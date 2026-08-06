@@ -1,0 +1,27 @@
+# === Core ===
+fastapi[standard]>=1.0,<2.0
+sqlalchemy[asyncio]>=2.0,<3.0
+asyncpg>=0.30,<1.0
+alembic>=1.14,<2.0
+pydantic-settings>=2.0,<3.0
+
+# === Vector support ===
+pgvector>=0.3,<1.0
+
+# === LangChain ecosystem (for Phase 3+ agent) ===
+langchain>=1.0,<2.0
+langchain-core>=1.0,<2.0
+langgraph>=1.0,<2.0
+langsmith>=0.3.0
+langchain-anthropic>=0.3,<1.0
+
+# === Calendar adapters (Phase 1) ===
+google-api-python-client>=2.0,<3.0
+google-auth-oauthlib>=1.0,<2.0
+caldav>=1.3,<2.0
+
+# === SMS (Phase 4) ===
+twilio>=9.0,<10.0
+
+# === Utilities ===
+python-dotenv>=1.0,<2.0

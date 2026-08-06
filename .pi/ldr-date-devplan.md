@@ -40,7 +40,7 @@ Not a chat app. A constraint-satisfaction + ideation agent that collapses "let's
 - **feedback**: `id`, `proposal_id`, `rating` (nullable, explicit), `implicit_signal` (accept|reject|rerun|mute), `created_at`
 - **sms_thread**: `id`, `proposal_id` (fk proposals), `user_id` (fk users), `raw_body`, `created_at`
 
-## 4. LangGraph flow (ideation graph)
+## 4. LangGraph flow (ideation graph, refer to ldr-date-agent-devplan.md)and
 
 Nodes, in order:
 
