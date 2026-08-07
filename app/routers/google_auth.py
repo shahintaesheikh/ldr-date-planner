@@ -1,0 +1,184 @@
+"""Google Calendar OAuth 2.0 routes.
+
+Two endpoints implement the OAuth authorization-code flow:
+
+- ``GET /auth/google?user_id=<int>`` — redirects the user to Google's
+  consent screen (offline access, so we get a refresh token).
+- ``GET /auth/google/callback`` — handles the redirect back from Google,
+  exchanges the auth code for tokens, and persists them in the
+  ``calendar_connections`` table.
+
+State management
+----------------
+A simple in-memory dict maps ``state`` tokens to ``user_id`` values so the
+callback can associate the OAuth response with the correct user.  This is
+adequate for single-server development; production should use Redis or the
+database.
+
+After a successful handshake the user is redirected to the frontend at
+``GOOGLE_SUCCESS_URL`` (default: ``/``).
+"""
+
+from __future__ import annotations
+
+import secrets
+from typing import Any
+
+from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import RedirectResponse
+from google_auth_oauthlib.flow import Flow
+from sqlalchemy import select
+
+from app import db, settings
+from app.models import CalendarConnection, CalendarProvider, ConnectionStatus
+
+router = APIRouter(prefix="/auth", tags=["google-calendar"])
+
+SCOPES = ["https://www.googleapis.com/auth/calendar"]
+
+# ---------------------------------------------------------------------------
+# In-memory OAuth state store  (state_token -> user_id)
+# ---------------------------------------------------------------------------
+_oauth_states: dict[str, int] = {}
+
+# ---------------------------------------------------------------------------
+# Client config template  (filled from settings at call time)
+# ---------------------------------------------------------------------------
+
+def _client_config() -> dict[str, Any]:
+    """Build the Google OAuth client config dict from settings."""
+    return {
+        "web": {
+            "client_id": settings.google_client_id,
+            "client_secret": settings.google_client_secret,
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "redirect_uris": [settings.google_redirect_uri],
+        }
+    }
+
+
+def _build_flow(state: str | None = None) -> Flow:
+    """Create a :class:`Flow` from the application settings."""
+    return Flow.from_client_config(
+        _client_config(),
+        scopes=SCOPES,
+        state=state,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
+
+@router.get("/google")
+async def google_auth_start(
+    user_id: int = Query(..., description="ID of the user connecting their Google Calendar"),
+) -> RedirectResponse:
+    """Start the Google Calendar OAuth 2.0 authorization-code flow.
+
+    Redirects the user's browser to Google's consent screen.  After
+    authorization Google redirects to ``/auth/google/callback``.
+    """
+    if not settings.google_client_id or not settings.google_client_secret:
+        raise HTTPException(
+            status_code=500,
+            detail="Google OAuth credentials not configured (GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET)",
+        )
+
+    # Generate a random state token and associate it with the user
+    state = secrets.token_urlsafe(32)
+    _oauth_states[state] = user_id
+
+    flow = _build_flow(state=state)
+    flow.redirect_uri = str(settings.google_redirect_uri)
+
+    authorization_url, _ = flow.authorization_url(
+        access_type="offline",
+        include_granted_scopes="true",
+        prompt="consent",  # Force consent screen so Google always issues a refresh_token
+    )
+
+    return RedirectResponse(url=authorization_url, status_code=302)
+
+
+@router.get("/google/callback")
+async def google_auth_callback(
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+) -> dict[str, str]:
+    """Handle the OAuth callback from Google.
+
+    Exchanges the authorization code for access + refresh tokens, stores them
+    in the ``calendar_connections`` table, and returns a success response.
+
+    On failure returns a JSON error body.
+    """
+    if error:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Google OAuth returned an error: {error}",
+        )
+
+    if not code or not state:
+        raise HTTPException(
+            status_code=400,
+            detail="Missing required OAuth parameters: code, state",
+        )
+
+    # Resolve the user_id from the stored state
+    user_id = _oauth_states.pop(state, None)
+    if user_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid or expired OAuth state parameter.  Please re-start the connection flow.",
+        )
+
+    # Exchange the auth code for tokens
+    flow = _build_flow(state=state)
+    flow.redirect_uri = str(settings.google_redirect_uri)
+
+    try:
+        flow.fetch_token(code=code)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to exchange authorization code for tokens: {exc}",
+        ) from exc
+
+    creds = flow.credentials
+
+    # Persist the tokens in the calendar_connections table
+    async with db.session() as session:
+        # Check for an existing Google connection for this user
+        result = await session.execute(
+            select(CalendarConnection).where(
+                CalendarConnection.user_id == user_id,
+                CalendarConnection.provider == CalendarProvider.google,
+            )
+        )
+        existing = result.scalar_one_or_none()
+
+        if existing:
+            existing.oauth_token = creds.to_json()
+            existing.refresh_token = creds.refresh_token
+            existing.status = ConnectionStatus.active
+        else:
+            conn = CalendarConnection(
+                user_id=user_id,
+                provider=CalendarProvider.google,
+                oauth_token=creds.to_json(),
+                refresh_token=creds.refresh_token,
+                status=ConnectionStatus.active,
+            )
+            session.add(conn)
+
+        await session.commit()
+
+    return {
+        "status": "success",
+        "message": "Google Calendar connected successfully",
+        "user_id": str(user_id),
+    }
