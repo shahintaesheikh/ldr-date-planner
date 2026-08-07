@@ -19,6 +19,12 @@ class Settings(BaseSettings):
     # --- Model Provider ---
     anthropic_api_key: str | None = None
 
+    # --- Embeddings ---
+    openai_api_key: str | None = None
+    embedding_model: str = "text-embedding-3-small"
+    embedding_dimensions: int = 1536
+    embedding_model_version: str = "openai-text-embedding-3-small-2025-01"
+
     # --- Twilio ---
     twilio_account_sid: str | None = None
     twilio_auth_token: str | None = None

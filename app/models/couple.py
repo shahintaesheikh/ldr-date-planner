@@ -185,6 +185,9 @@ class DateActivity(Base):
     embedding: Mapped[list[float] | None] = mapped_column(
         Vector(1536), nullable=True
     )  # pgvector; OpenAI embedding dim
+    embedding_model_version: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )  # tracks which model produced the embedding, for drift detection
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
