@@ -136,4 +136,4 @@ Wrap calls in `try/except HttpError` (`from googleapiclient.errors import HttpEr
 
 ## Reference
 
-Guides: https://developers.google.com/workspace/calendar/api/guides/overview · Create events: https://developers.google.com/workspace/calendar/api/guides/create-events · Errors: https://developers.google.com/workspace/calendar/api/guides/errors · Sync: https://developers.google.com/workspace/calendar/api/guides/sync · Python quickstart: https://developers.google.com/workspace/calendar/api/quickstart/python
+Guides: https://developers.google.com/workspace/calendar/api/guides/overview · Create events: https://developers.google.com/workspace/calendar/api/guides/create-events · Errors: https://developers.google.com/workspace/calendar/api/guides/errors · Sync: https://developers.google.com/workspace/calendar/api/guides/sync · Python quickstart: https://developers.google.com/workspace/calendar/api/quickstart/pyt
