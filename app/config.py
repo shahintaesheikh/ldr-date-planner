@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     twilio_account_sid: str | None = None
     twilio_auth_token: str | None = None
     twilio_phone_number: str | None = None
+    twilio_status_callback_url: str | None = None
 
     # --- Calendar Providers ---
     google_client_id: str | None = None

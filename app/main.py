@@ -4,7 +4,7 @@ from collections.abc import AsyncIterator
 from fastapi import FastAPI
 
 from app import db, settings
-from app.routers import catalog_router, google_auth_router, health_router
+from app.routers import catalog_router, google_auth_router, health_router, twilio_router
 
 
 @asynccontextmanager
@@ -26,3 +26,4 @@ app = FastAPI(
 app.include_router(catalog_router)
 app.include_router(google_auth_router)
 app.include_router(health_router)
+app.include_router(twilio_router)

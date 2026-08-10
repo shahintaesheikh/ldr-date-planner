@@ -49,11 +49,17 @@ class TwilioSMSGateway:
         Twilio Auth Token (``TWILIO_AUTH_TOKEN``).
     from_phone:
         The provisioned Twilio number to send from (``TWILIO_PHONE_NUMBER``).
+    status_callback_url:
+        Optional URL for delivery status callbacks (``TWILIO_STATUS_CALLBACK_URL``).
+        When set, ``messages.create()`` includes ``status_callback`` so Twilio
+        posts delivery state transitions to this endpoint.  See
+        ``twilio-webhook-architecture`` for status callback patterns.
     """
 
     account_sid: str
     auth_token: str
     from_phone: str
+    status_callback_url: str | None = None
 
     def __post_init__(self) -> None:
         self._client = None
@@ -79,12 +85,22 @@ class TwilioSMSGateway:
         return self._client
 
     async def send(self, to_phone: str, body: str) -> str:
-        """Send via Twilio (the REST client is sync; dispatched to a thread)."""
+        """Send via Twilio (the REST client is sync; dispatched to a thread).
+
+        When ``status_callback_url`` is configured, the outbound message
+        includes a ``status_callback`` parameter so Twilio posts delivery
+        state transitions to the app's ``/sms-status`` endpoint.
+        """
         client = self._client()
+        kwargs: dict = {
+            "to": to_phone,
+            "from_": self.from_phone,
+            "body": body,
+        }
+        if self.status_callback_url:
+            kwargs["status_callback"] = self.status_callback_url
         message = await asyncio.to_thread(
-            lambda: client.messages.create(
-                to=to_phone, from_=self.from_phone, body=body
-            )
+            lambda: client.messages.create(**kwargs)
         )
         return message.sid
 
@@ -109,16 +125,26 @@ def build_sms_gateway(
     account_sid: str | None,
     auth_token: str | None,
     from_phone: str | None,
+    status_callback_url: str | None = None,
 ) -> SMSGateway:
     """Build the production gateway if Twilio is configured, else the dev one.
 
     Intended for the FastAPI layer / test harness to construct once per app.
+
+    Parameters
+    ----------
+    status_callback_url:
+        Public URL for Twilio to POST delivery status updates to
+        (e.g. ``https://example.com/sms-status``).  Passed through to
+        ``TwilioSMSGateway`` when Twilio credentials are configured.
+        Ignored when using the dev ``LoggingSMSGateway``.
     """
     if account_sid and auth_token and from_phone:
         return TwilioSMSGateway(
             account_sid=account_sid,
             auth_token=auth_token,
             from_phone=from_phone,
+            status_callback_url=status_callback_url,
         )
     logger.warning(
         "Twilio credentials not configured — using dev LoggingSMSGateway. "
