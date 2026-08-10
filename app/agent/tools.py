@@ -127,6 +127,7 @@ def build_ideate_tools(deps: GraphDeps) -> list:
         activity, was_created = await deps.catalog.create_with_dedup(
             deps.db, activity_in
         )
+        # Only creates if dedup wasn't found with create_with_dedup
         if was_created:
             return f"Added to catalog: id={activity.id} name={activity.name} (source=llm)"
         return (
