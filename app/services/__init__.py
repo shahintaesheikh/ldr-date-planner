@@ -7,8 +7,28 @@ scoped to a single ``AsyncSession`` and are instantiated per-request::
     async with db.session() as session:
         store = TraitStore(session)
         traits = await store.get_trait_set(couple_id=42)
+
+``CatalogService`` is a stateless module singleton whose methods take the
+session as their first argument (it needs no per-session state).  The
+session-scoped stores are constructed per request.
 """
 
+from app.services.calendar_resolver import CalendarResolver, ResolvedCalendar
+from app.services.catalog import CatalogService, catalog_service
+from app.services.couple_store import CoupleStore
+from app.services.feedback_store import FeedbackStore
+from app.services.proposal_store import ProposalStore
+from app.services.sms_thread_store import SMSThreadStore
 from app.services.trait_store import TraitStore
 
-__all__ = ["TraitStore"]
+__all__ = [
+    "CalendarResolver",
+    "CatalogService",
+    "CoupleStore",
+    "FeedbackStore",
+    "ProposalStore",
+    "ResolvedCalendar",
+    "SMSThreadStore",
+    "TraitStore",
+    "catalog_service",
+]
