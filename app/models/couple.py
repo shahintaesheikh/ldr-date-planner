@@ -151,7 +151,12 @@ class Trait(Base):
     )
     trait_key: Mapped[str] = mapped_column(String(64), nullable=False)
     value: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Implicit weight track — updated by EMA on accept/reject/rerun signals.
     weight: Mapped[float] = mapped_column(Float, nullable=False, server_default="1.0")
+    # Explicit weight track — written only by explicit ratings; NULL until the
+    # first rating lands. Blended with ``weight`` at read time in
+    # ``TraitStore.get_trait_set`` (see ldr-phase6-plan.md §1).
+    explicit_weight: Mapped[float | None] = mapped_column(Float, nullable=True)
     source: Mapped[TraitSource] = mapped_column(
         Enum(TraitSource, name="trait_source"),
         nullable=False,

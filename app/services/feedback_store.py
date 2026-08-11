@@ -24,7 +24,7 @@ class FeedbackStore:
         signal: FeedbackSignal,
         rating: int | None = None,
     ) -> Feedback:
-        """Write a feedback row for a proposal.
+        """Write a feedback row for a proposal (implicit-signal path).
 
         Args:
             proposal_id: The proposal the feedback refers to.
@@ -35,6 +35,28 @@ class FeedbackStore:
             proposal_id=proposal_id,
             rating=rating,
             implicit_signal=signal,
+        )
+        self._session.add(feedback)
+        await self._session.flush()
+        return feedback
+
+    async def log_rating(self, proposal_id: int, rating: int | None) -> Feedback:
+        """Write an explicit-rating feedback row for a proposal.
+
+        Distinct from :meth:`log`: the row is created with ``rating`` set and
+        ``implicit_signal`` left ``None``, keeping the two write paths
+        explicit. A ``None`` rating (SKIP reply) still writes a row so the
+        rating-trigger job treats the proposal as "asked" and does not
+        re-prompt on the next scheduled run.
+
+        Args:
+            proposal_id: The proposal the rating refers to.
+            rating: The numeric rating (1-5), or ``None`` for SKIP.
+        """
+        feedback = Feedback(
+            proposal_id=proposal_id,
+            rating=rating,
+            implicit_signal=None,
         )
         self._session.add(feedback)
         await self._session.flush()

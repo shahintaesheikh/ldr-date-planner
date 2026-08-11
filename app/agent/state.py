@@ -111,6 +111,9 @@ class SMSState(TypedDict):
     proposal_id: int | None  # resolved pending proposal
     intent: str | None  # "YES" | "NO" | "RERUN" | "STOP" | "EDIT" | "UNKNOWN"
 
+    # --- Populated by classify_intent (rating branch) ---
+    rating_parsed: int | str | None  # 1-5 or "SKIP", set by rating branch
+
     # --- Populated by edit_proposal (agentic node) ---
     edit: dict | None  # serialised ProposalEdit (or None = no-op)
     needs_clarification: bool | None

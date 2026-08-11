@@ -16,6 +16,7 @@ session-scoped stores are constructed per request.
 from app.services.calendar_resolver import CalendarResolver, ResolvedCalendar
 from app.services.catalog import CatalogService, catalog_service
 from app.services.couple_store import CoupleStore
+from app.services.feedback_attribution import FeedbackAttribution
 from app.services.feedback_store import FeedbackStore
 from app.services.proposal_store import ProposalStore
 from app.services.sms_thread_store import SMSThreadStore
@@ -25,6 +26,7 @@ __all__ = [
     "CalendarResolver",
     "CatalogService",
     "CoupleStore",
+    "FeedbackAttribution",
     "FeedbackStore",
     "ProposalStore",
     "ResolvedCalendar",

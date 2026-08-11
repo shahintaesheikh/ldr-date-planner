@@ -5,14 +5,17 @@ from fastapi import FastAPI
 
 from app import db, settings
 from app.routers import catalog_router, google_auth_router, health_router, twilio_router
+from app.services.rating_scheduler import start_scheduler, stop_scheduler
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """FastAPI lifespan handler — initialises and tears down resources."""
-    # Startup: DatabaseManager is already created in app/__init__.py
+    # Startup: initialise scheduler
+    start_scheduler()
     yield
-    # Shutdown: clean up database connections
+    # Shutdown: clean up database connections and scheduler
+    stop_scheduler()
     await db.close()
 
 

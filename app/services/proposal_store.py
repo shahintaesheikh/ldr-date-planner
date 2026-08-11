@@ -72,6 +72,37 @@ class ProposalStore:
         )
         return list(result.scalars().all())
 
+    async def get_awaiting_rating(self, couple_id: int) -> Proposal | None:
+        """Return the most recent confirmed proposal whose end time has passed
+        and that has no associated feedback rating yet.
+
+        This is the query the rating-trigger job runs per couple: it finds
+        proposals that need a follow-up SMS asking "How was it?"
+
+        A ``SKIP`` reply writes a feedback row (with ``rating=None``), so
+        the proposal is still marked as "asked" and will not be re-prompted.
+
+        Returns ``None`` if no proposal matches (all up-to-date).
+        """
+        now = datetime.now(timezone.utc)
+        result = await self._session.execute(
+            select(Proposal)
+            .where(
+                Proposal.couple_id == couple_id,
+                Proposal.status == ProposalStatus.confirmed,
+                Proposal.proposed_end < now,
+                # No feedback row exists at all for this proposal — i.e. the
+                # rating prompt hasn't been sent yet, or was sent but the
+                # user hasn't replied.  Once any feedback row exists (even
+                # with rating=None for SKIP), the proposal is considered
+                # "asked" and excluded from future prompts.
+                ~Proposal.feedback.any(),
+            )
+            .order_by(Proposal.proposed_end.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
     # ------------------------------------------------------------------
     # Write
     # ------------------------------------------------------------------

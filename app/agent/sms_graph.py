@@ -38,6 +38,7 @@ from app.agent.state import ProposalDraft, SMSState
 from app.agent.tools import ProposalEdit
 from app.models import FeedbackSignal, ProposalStatus
 from app.schemas.proposal import ProposalUpdate
+from app.services.feedback_attribution import FeedbackAttribution
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,32 @@ _YES_RE = re.compile(
 _NO_RE = re.compile(
     r"\b(no|nope|nah|pass|decline|not that|not this|not now)\b", re.IGNORECASE
 )
+
+# Rating fast-path (Phase 6 — reply to the "How was it?" prompt).
+# Matches a bare 1-5 digit or the SKIP keyword, so a rating reply arriving
+# after a proposal was confirmed (and thus no longer pending) routes to
+# ``route_rating`` instead of falling through to the edit path.
+_RATING_RE = re.compile(r"^(?:\s*([1-5])\s*)$", re.IGNORECASE)
+_SKIP_RE = re.compile(r"^\s*(skip|skip it|skip this one)\s*$", re.IGNORECASE)
+
+
+def parse_rating_reply(raw_body: str) -> int | str | None:
+    """Parse a reply as a rating (1-5) or SKIP.
+
+    Returns:
+        - ``int`` 1-5 for a rating reply
+        - ``"SKIP"`` for a skip reply
+        - ``None`` if the reply is not a rating/skip
+    """
+    body = raw_body.strip()
+    if not body:
+        return None
+    rating_match = _RATING_RE.match(body)
+    if rating_match:
+        return int(rating_match.group(1))
+    if _SKIP_RE.match(body):
+        return "SKIP"
+    return None
 
 
 def classify_reply(raw_body: str) -> str:
@@ -114,6 +141,27 @@ async def classify_intent(state: dict, config: RunnableConfig) -> dict:
     proposal = await deps.proposal_store.get_latest_pending(couple.id)
     proposal_id = proposal.id if proposal else None
 
+    # Phase 6 rating branch: if no pending proposal exists, check whether
+    # the reply is a rating (1-5) or SKIP directed at a past confirmed
+    # proposal.  If so, route to ``route_rating`` instead of the edit path.
+    if proposal_id is None:
+        rating = parse_rating_reply(state["raw_body"])
+        if rating is not None:
+            awaiting = await deps.proposal_store.get_awaiting_rating(couple.id)
+            if awaiting is not None:
+                proposal_id = awaiting.id
+                # Append the rating reply to the awaiting proposal's thread.
+                await deps.sms_thread_store.append(
+                    proposal_id=proposal_id, user_id=user.id, raw_body=state["raw_body"]
+                )
+                return {
+                    "couple_id": couple.id,
+                    "user_id": user.id,
+                    "proposal_id": proposal_id,
+                    "intent": "RATING",
+                    "rating_parsed": rating,
+                }
+
     # Append the raw reply to the proposal's thread for conversation context.
     if proposal_id is not None:
         await deps.sms_thread_store.append(
@@ -131,7 +179,7 @@ async def classify_intent(state: dict, config: RunnableConfig) -> dict:
 def _route_on_intent(
     state: dict,
 ) -> Literal[
-    "route_yes", "route_no", "route_rerun", "route_stop", "edit_proposal", "send_clarification"
+    "route_yes", "route_no", "route_rerun", "route_stop", "route_rating", "edit_proposal", "send_clarification"
 ]:
     """Conditional router after classify_intent."""
     return {
@@ -139,6 +187,7 @@ def _route_on_intent(
         "NO": "route_no",
         "RERUN": "route_rerun",
         "STOP": "route_stop",
+        "RATING": "route_rating",
         "EDIT": "edit_proposal",
         "UNKNOWN": "send_clarification",
     }.get(state.get("intent"), "send_clarification")
@@ -161,6 +210,10 @@ async def route_yes(state: dict, config: RunnableConfig) -> dict:
         proposal_id, ProposalStatus.confirmed, confirmed_by=user_id
     )
     await deps.feedback_store.log(proposal_id, FeedbackSignal.accept)
+
+    # Attribute the accept signal to the activity's tags (implicit track).
+    attribution = FeedbackAttribution(deps.db)
+    await attribution.attribute(proposal_id, FeedbackSignal.accept)
 
     activity = await deps.catalog.get_by_id(deps.db, proposal.activity_id)
     title = f"Date night: {activity.name}" if activity else "Date night"
@@ -216,6 +269,9 @@ async def route_no(state: dict, config: RunnableConfig) -> dict:
     if proposal_id:
         await deps.proposal_store.set_status(proposal_id, ProposalStatus.rejected)
         await deps.feedback_store.log(proposal_id, FeedbackSignal.reject)
+        # Attribute the reject signal to the activity's tags (implicit track).
+        attribution = FeedbackAttribution(deps.db)
+        await attribution.attribute(proposal_id, FeedbackSignal.reject)
     return {}
 
 
@@ -232,6 +288,10 @@ async def route_rerun(state: dict, config: RunnableConfig) -> dict:
             prior_activity_id = proposal.activity_id
             await deps.proposal_store.set_status(proposal_id, ProposalStatus.rejected)
             await deps.feedback_store.log(proposal_id, FeedbackSignal.reject)
+            # Attribute the rerun signal to the activity's tags (implicit
+            # track, dampened strength — "rerun ≠ reject").
+            attribution = FeedbackAttribution(deps.db)
+            await attribution.attribute(proposal_id, FeedbackSignal.rerun)
 
     # Re-invoke the ideation graph (imported lazily to avoid import cycles).
     from app.agent.ideation_graph import ideation_graph
@@ -265,6 +325,42 @@ async def route_stop(state: dict, config: RunnableConfig) -> dict:
         await deps.couple_store.set_muted(state["couple_id"], muted=True)
     if state.get("proposal_id"):
         await deps.feedback_store.log(state["proposal_id"], FeedbackSignal.mute)
+    return {}
+
+
+async def route_rating(state: dict, config: RunnableConfig) -> dict:
+    """Handle a rating reply (1-5 or SKIP) to a past confirmed proposal.
+
+    Parses the rating digit, logs it via ``feedback_store.log_rating``,
+    and attributes the signal to the activity's tags via
+    ``feedback_attribution.attribute_rating``.
+
+    A ``SKIP`` reply records a ``None`` rating so the scheduler does not
+    re-prompt for this proposal.
+    """
+    deps = _deps(config).resolved()
+    proposal_id = state.get("proposal_id")
+    rating = state.get("rating_parsed")
+
+    if proposal_id is None:
+        return {"errors": ["route_rating: no proposal_id in state"]}
+
+    # Convert SKIP to None rating for persistence.
+    numeric_rating: int | None = rating if isinstance(rating, int) else None
+
+    await deps.feedback_store.log_rating(proposal_id, numeric_rating)
+
+    # Attribute the rating signal to the activity's tags (explicit track).
+    attribution = FeedbackAttribution(deps.db)
+    updated_tags = await attribution.attribute_rating(proposal_id, numeric_rating)
+
+    logger.info(
+        "route_rating: proposal %d rating=%s tags_updated=%s",
+        proposal_id,
+        numeric_rating,
+        updated_tags,
+    )
+
     return {}
 
 
@@ -452,6 +548,7 @@ def build_sms_graph():
     graph.add_node("route_no", route_no)
     graph.add_node("route_rerun", route_rerun)
     graph.add_node("route_stop", route_stop)
+    graph.add_node("route_rating", route_rating)
     graph.add_node("edit_proposal", edit_proposal)
     graph.add_node("validate_edit", validate_edit)
     graph.add_node("send_clarification", send_clarification)
@@ -467,6 +564,7 @@ def build_sms_graph():
             "route_no": "route_no",
             "route_rerun": "route_rerun",
             "route_stop": "route_stop",
+            "route_rating": "route_rating",
             "edit_proposal": "edit_proposal",
             "send_clarification": "send_clarification",
         },
@@ -475,6 +573,7 @@ def build_sms_graph():
     graph.add_edge("route_no", END)
     graph.add_edge("route_rerun", END)
     graph.add_edge("route_stop", END)
+    graph.add_edge("route_rating", END)
     graph.add_edge("edit_proposal", "validate_edit")
     graph.add_conditional_edges(
         "validate_edit",
