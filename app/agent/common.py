@@ -223,7 +223,7 @@ def format_proposal_sms(
 
 def format_clarification_sms(msg: str) -> str:
     """Format a clarification/follow-up SMS (edit path fallback)."""
-    return f"Sorry, I didn't understand that. {msg} Reply YES, NO, RERUN, or STOP."
+    return f"Sorry, I didn't understand that. {msg}"
 
 
 def format_confirmation_sms(
