@@ -295,6 +295,7 @@ async def edit_proposal(state: dict, config: RunnableConfig) -> dict:
     proposal_json = json.dumps(_proposal_to_dict(proposal), indent=2)
     llm_with_tool = deps.llm.bind_tools([ProposalEdit])
 
+    # Invoke agent with sms reply context and current proposal
     resp = await llm_with_tool.ainvoke(
         [
             SystemMessage(content=EDIT_SYSTEM_PROMPT),
@@ -340,6 +341,7 @@ async def validate_edit(state: dict, config: RunnableConfig) -> dict:
     """
     deps = _deps(config).resolved()
 
+    # Get proposed edit that will show up in the state; check if it exists and makes sense
     edit = state.get("edit")
     if edit is None:
         return {
