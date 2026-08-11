@@ -28,3 +28,4 @@ openai>=1.0,<2.0
 
 # === Utilities ===
 python-dotenv>=1.0,<2.0
+apscheduler>=3.10,<4.0
