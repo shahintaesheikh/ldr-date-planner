@@ -207,6 +207,7 @@ async def _process_inbound_sms(
                     "user_id": None,
                     "proposal_id": None,
                     "intent": None,
+                    "rating_parsed": None,
                     "edit": None,
                     "edit_valid": None,
                     "needs_clarification": None,

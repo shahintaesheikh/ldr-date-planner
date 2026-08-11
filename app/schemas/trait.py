@@ -34,7 +34,13 @@ class TraitCreate(BaseModel):
         default=1.0,
         ge=0.0,
         le=1.0,
-        description="Weight of this trait (0.0–1.0). Higher = more influential in ideation.",
+        description="Implicit weight of this trait (0.0–1.0). Updated by EMA on feedback signals.",
+    )
+    explicit_weight: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Explicit weight track; set by ratings. NULL until first rating.",
     )
     source: TraitSource = Field(
         default=TraitSource.explicit,
@@ -57,7 +63,13 @@ class TraitUpdate(BaseModel):
         default=None,
         ge=0.0,
         le=1.0,
-        description="New weight for this trait",
+        description="New implicit weight for this trait",
+    )
+    explicit_weight: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="New explicit weight for this trait",
     )
     source: TraitSource | None = Field(
         default=None,
@@ -73,6 +85,7 @@ class TraitRead(BaseModel):
     trait_key: str
     value: str
     weight: float
+    explicit_weight: float | None
     source: TraitSource
     updated_at: datetime
 
