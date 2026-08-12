@@ -48,67 +48,79 @@ _MAX_IDEATE_STEPS = 8
 
 async def fetch_availability(state: dict, config: RunnableConfig) -> dict:
     """Pull busy/free blocks from both partners' calendars (UTC)."""
-    deps = _deps(config).resolved()
-    couple = await deps.couple_store.get_couple(state["couple_id"])
-    if couple is None:
-        return {"errors": [f"Couple {state['couple_id']} not found"]}
+    try:
+        deps = _deps(config).resolved()
+        couple = await deps.couple_store.get_couple(state["couple_id"])
+        if couple is None:
+            return {"errors": state.get("errors", []) + [f"Couple {state['couple_id']} not found"]}
 
-    resolved = await deps.calendar_resolver.get_active_adapters(
-        deps.db, state["couple_id"]
-    )
-
-    busy_a: list[dict] = []
-    busy_b: list[dict] = []
-    had_a = False
-    had_b = False
-    errors: list[str] = []
-
-    for rc in resolved:
-        blocks = await rc.adapter.get_busy_blocks(
-            state["window_start"], state["window_end"]
-        )
-        serialized = [{"start": b.start, "end": b.end} for b in blocks]
-        if rc.user_id == couple.partner_a_user_id:
-            busy_a = serialized
-            had_a = True
-        elif rc.user_id == couple.partner_b_user_id:
-            busy_b = serialized
-            had_b = True
-
-    if not had_a:
-        errors.append(
-            "Partner A has no active calendar connection — treated as fully free"
-        )
-    if not had_b:
-        errors.append(
-            "Partner B has no active calendar connection — treated as fully free"
+        resolved = await deps.calendar_resolver.get_active_adapters(
+            deps.db, state["couple_id"]
         )
 
-    return {"busy_blocks_a": busy_a, "busy_blocks_b": busy_b, "errors": errors}
+        busy_a: list[dict] = []
+        busy_b: list[dict] = []
+        had_a = False
+        had_b = False
+        errors: list[str] = state.get("errors", [])[:]
+
+        for rc in resolved:
+            blocks = await rc.adapter.get_busy_blocks(
+                state["window_start"], state["window_end"]
+            )
+            serialized = [{"start": b.start, "end": b.end} for b in blocks]
+            if rc.user_id == couple.partner_a_user_id:
+                busy_a = serialized
+                had_a = True
+            elif rc.user_id == couple.partner_b_user_id:
+                busy_b = serialized
+                had_b = True
+
+        if not had_a:
+            errors.append(
+                "Partner A has no active calendar connection — treated as fully free"
+            )
+        if not had_b:
+            errors.append(
+                "Partner B has no active calendar connection — treated as fully free"
+            )
+
+        return {"busy_blocks_a": busy_a, "busy_blocks_b": busy_b, "errors": errors}
+    except Exception as exc:
+        logger.exception("Error in fetch_availability: %s", exc)
+        return {"errors": state.get("errors", []) + [f"fetch_availability: {exc}"]}
 
 
 def find_overlap_windows(state: dict) -> dict:
     """Constraint-solve: intersect free blocks, filter >= min duration, rank."""
-    free_a = free_blocks(
-        state["window_start"], state["window_end"], state.get("busy_blocks_a", [])
-    )
-    free_b = free_blocks(
-        state["window_start"], state["window_end"], state.get("busy_blocks_b", [])
-    )
-    windows = intersect_windows(
-        free_a, free_b, min_duration_min=state.get("min_duration_min", 60)
-    )
-    windows = rank_windows(
-        windows, on_demand=state.get("on_demand", True), now=state["window_start"]
-    )
-    return {"overlap_windows": windows}
+    try:
+        free_a = free_blocks(
+            state["window_start"], state["window_end"], state.get("busy_blocks_a", [])
+        )
+        free_b = free_blocks(
+            state["window_start"], state["window_end"], state.get("busy_blocks_b", [])
+        )
+        windows = intersect_windows(
+            free_a, free_b, min_duration_min=state.get("min_duration_min", 60)
+        )
+        windows = rank_windows(
+            windows, on_demand=state.get("on_demand", True), now=state["window_start"]
+        )
+        return {"overlap_windows": windows}
+    except Exception as exc:
+        logger.exception("Error in find_overlap_windows: %s", exc)
+        return {"overlap_windows": [], "errors": state.get("errors", []) + [f"find_overlap_windows: {exc}"]}
 
 
 async def load_traits(state: dict, config: RunnableConfig) -> dict:
     """Deterministic DB read of the couple's current trait vector."""
-    deps = _deps(config).resolved()
-    trait_set = await deps.trait_store.get_trait_set(state["couple_id"])
-    return {"trait_set": trait_set}
+    try:
+        deps = _deps(config).resolved()
+        trait_set = await deps.trait_store.get_trait_set(state["couple_id"])
+        return {"trait_set": trait_set}
+    except Exception as exc:
+        logger.exception("Error in load_traits: %s", exc)
+        return {"trait_set": None, "errors": state.get("errors", []) + [f"load_traits: {exc}"]}
 
 
 async def ideate_activity(state: dict, config: RunnableConfig) -> dict:
@@ -119,48 +131,52 @@ async def ideate_activity(state: dict, config: RunnableConfig) -> dict:
     gate (catalog first, web only below the similarity threshold); the loop
     itself is bounded so a misbehaving model cannot run forever.
     """
-    deps = _deps(config).resolved()
-    if deps.llm is None:
-        raise RuntimeError(
-            "ideate_activity requires deps.llm (an LLM). Set ANTHROPIC_API_KEY "
-            "and inject a model, or pass a mock in tests."
-        )
-
-    tools = {t.name: t for t in build_ideate_tools(deps)}
-    bound = deps.llm.bind_tools(list(tools.values()))
-
-    messages: list = [
-        SystemMessage(content=IDEATE_SYSTEM_PROMPT),
-        HumanMessage(content=_build_ideate_payload(state)),
-    ]
-
-    for _ in range(_MAX_IDEATE_STEPS):
-        response = await bound.ainvoke(messages)
-        messages.append(response)
-
-        tool_calls = getattr(response, "tool_calls", None) or []
-        if not tool_calls:
-            break
-
-        for tc in tool_calls:
-            name = tc.get("name")
-            the_tool = tools.get(name)
-            if the_tool is None:
-                messages.append(
-                    ToolMessage(
-                        content=f"Unknown tool: {name}", tool_call_id=tc.get("id")
-                    )
-                )
-                continue
-            result = await the_tool.ainvoke(tc.get("args") or {})
-            messages.append(
-                ToolMessage(content=str(result), tool_call_id=tc.get("id"))
+    try:
+        deps = _deps(config).resolved()
+        if deps.llm is None:
+            raise RuntimeError(
+                "ideate_activity requires deps.llm (an LLM). Set ANTHROPIC_API_KEY "
+                "and inject a model, or pass a mock in tests."
             )
 
-    activity = _extract_activity(messages)
-    if activity is None:
-        return {"errors": ["ideate_activity produced no selected activity"]}
-    return {"selected_activity": activity}
+        tools = {t.name: t for t in build_ideate_tools(deps)}
+        bound = deps.llm.bind_tools(list(tools.values()))
+
+        messages: list = [
+            SystemMessage(content=IDEATE_SYSTEM_PROMPT),
+            HumanMessage(content=_build_ideate_payload(state)),
+        ]
+
+        for _ in range(_MAX_IDEATE_STEPS):
+            response = await bound.ainvoke(messages)
+            messages.append(response)
+
+            tool_calls = getattr(response, "tool_calls", None) or []
+            if not tool_calls:
+                break
+
+            for tc in tool_calls:
+                name = tc.get("name")
+                the_tool = tools.get(name)
+                if the_tool is None:
+                    messages.append(
+                        ToolMessage(
+                            content=f"Unknown tool: {name}", tool_call_id=tc.get("id")
+                        )
+                    )
+                    continue
+                result = await the_tool.ainvoke(tc.get("args") or {})
+                messages.append(
+                    ToolMessage(content=str(result), tool_call_id=tc.get("id"))
+                )
+
+        activity = _extract_activity(messages)
+        if activity is None:
+            return {"errors": state.get("errors", []) + ["ideate_activity produced no selected activity"]}
+        return {"selected_activity": activity}
+    except Exception as exc:
+        logger.exception("Error in ideate_activity: %s", exc)
+        return {"selected_activity": None, "errors": state.get("errors", []) + [f"ideate_activity: {exc}"]}
 
 
 async def estimate_duration(state: dict, config: RunnableConfig) -> dict:
@@ -169,31 +185,35 @@ async def estimate_duration(state: dict, config: RunnableConfig) -> dict:
     Uses the catalog's ``est_duration_min`` as a prior. Floor is 60 minutes. If
     no LLM is injected, falls back to the catalog's estimate.
     """
-    deps = _deps(config).resolved()
-    activity = state.get("selected_activity")
-    windows = state.get("overlap_windows") or []
-    min_duration = state.get("min_duration_min", 60)
+    try:
+        deps = _deps(config).resolved()
+        activity = state.get("selected_activity")
+        windows = state.get("overlap_windows") or []
+        min_duration = state.get("min_duration_min", 60)
 
-    if activity is None or not windows:
-        return {"errors": ["estimate_duration requires selected_activity and windows"]}
+        if activity is None or not windows:
+            return {"errors": state.get("errors", []) + ["estimate_duration requires selected_activity and windows"]}
 
-    prior = max(activity.get("est_duration_min") or 60, min_duration)
-    if deps.llm is not None:
-        duration = await _ask_duration_estimate(deps.llm, activity, windows)
-    else:
-        duration = prior
+        prior = max(activity.get("est_duration_min") or 60, min_duration)
+        if deps.llm is not None:
+            duration = await _ask_duration_estimate(deps.llm, activity, windows)
+        else:
+            duration = prior
 
-    duration = max(duration, 60)
-    window = _pick_window(windows, duration)
+        duration = max(duration, 60)
+        window = _pick_window(windows, duration)
 
-    if window is None:
-        return {"errors": [f"No overlap window fits a {duration}min activity"]}
+        if window is None:
+            return {"errors": state.get("errors", []) + [f"No overlap window fits a {duration}min activity"]}
 
-    # Clamp duration to the chosen window
-    duration = min(duration, window.duration_min)
-    activity["est_duration_min"] = duration
+        # Clamp duration to the chosen window
+        duration = min(duration, window.duration_min)
+        activity["est_duration_min"] = duration
 
-    return {"selected_activity": activity, "selected_window": window}
+        return {"selected_activity": activity, "selected_window": window}
+    except Exception as exc:
+        logger.exception("Error in estimate_duration: %s", exc)
+        return {"selected_window": None, "errors": state.get("errors", []) + [f"estimate_duration: {exc}"]}
 
 
 # =========================================================================

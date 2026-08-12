@@ -271,46 +271,50 @@ async def compose_proposal(state: dict, config: RunnableConfig) -> dict:
 
     Short-circuits if required data is missing (e.g. upstream node errored).
     """
-    deps: GraphDeps = _deps(config).resolved()
+    try:
+        deps: GraphDeps = _deps(config).resolved()
 
-    # Build the draft if the caller didn't set one (ideation path).
-    draft = state.get("draft")
-    if draft is None:
-        try:
-            draft = _draft_from_ideation(state)
-        except ValueError as exc:
-            return {"errors": [f"compose_proposal: {exc}"]}
+        # Build the draft if the caller didn't set one (ideation path).
+        draft = state.get("draft")
+        if draft is None:
+            try:
+                draft = _draft_from_ideation(state)
+            except ValueError as exc:
+                return {"errors": state.get("errors", []) + [f"compose_proposal: {exc}"]}
 
-    # Persist
-    if state.get("proposal_id"):
-        proposal = await deps.proposal_store.update(
-            state["proposal_id"],
-            ProposalUpdate(
+        # Persist
+        if state.get("proposal_id"):
+            proposal = await deps.proposal_store.update(
+                state["proposal_id"],
+                ProposalUpdate(
+                    activity_id=draft.activity_id,
+                    proposed_start=draft.start,
+                    proposed_end=draft.end,
+                ),
+            )
+            if proposal is None:
+                return {"errors": state.get("errors", []) + [f"Proposal {state['proposal_id']} not found for update"]}
+        else:
+            proposal = await deps.proposal_store.create_pending(
+                couple_id=state["couple_id"],
                 activity_id=draft.activity_id,
                 proposed_start=draft.start,
                 proposed_end=draft.end,
-            ),
-        )
-        if proposal is None:
-            return {"errors": [f"Proposal {state['proposal_id']} not found for update"]}
-    else:
-        proposal = await deps.proposal_store.create_pending(
-            couple_id=state["couple_id"],
-            activity_id=draft.activity_id,
-            proposed_start=draft.start,
-            proposed_end=draft.end,
-        )
+            )
 
-    proposal_dict = _proposal_to_dict(proposal)
+        proposal_dict = _proposal_to_dict(proposal)
 
-    # Format SMS (base copy in UTC — deliver_sms will localise per recipient)
-    sms_copy = format_proposal_sms(draft, local_tz_name="UTC")
+        # Format SMS (base copy in UTC — deliver_sms will localise per recipient)
+        sms_copy = format_proposal_sms(draft, local_tz_name="UTC")
 
-    return {
-        "proposal": proposal_dict,
-        "sms_copy": sms_copy,
-        "draft": draft,
-    }
+        return {
+            "proposal": proposal_dict,
+            "sms_copy": sms_copy,
+            "draft": draft,
+        }
+    except Exception as exc:
+        logger.exception("Error in compose_proposal: %s", exc)
+        return {"errors": state.get("errors", []) + [f"compose_proposal: {exc}"]}
 
 
 def _draft_from_ideation(state: dict) -> ProposalDraft:
@@ -343,71 +347,79 @@ async def deliver_sms(state: dict, config: RunnableConfig) -> dict:
     Localises the time per recipient's timezone.  Uses the ``SMSGateway``
     from deps.  Short-circuits if no draft is available (upstream error).
     """
-    deps: GraphDeps = _deps(config).resolved()
-    gateway = deps.sms_gateway
+    try:
+        deps: GraphDeps = _deps(config).resolved()
+        gateway = deps.sms_gateway
 
-    draft = state.get("draft")
-    if draft is None:
-        return {"errors": ["deliver_sms: no draft in state — upstream node likely failed"]}
+        draft = state.get("draft")
+        if draft is None:
+            return {"errors": state.get("errors", []) + ["deliver_sms: no draft in state — upstream node likely failed"]}
 
-    # Resolve both partners
-    couple = await deps.couple_store.get_couple(state["couple_id"])
-    if couple is None:
-        return {"errors": [f"Couple {state['couple_id']} not found"]}
+        # Resolve both partners
+        couple = await deps.couple_store.get_couple(state["couple_id"])
+        if couple is None:
+            return {"errors": state.get("errors", []) + [f"Couple {state['couple_id']} not found"]}
 
-    users = await deps.couple_store.partner_users(couple)
-    if not users:
-        return {"errors": ["No partners found for couple"]}
+        users = await deps.couple_store.partner_users(couple)
+        if not users:
+            return {"errors": state.get("errors", []) + ["No partners found for couple"]}
 
-    results: list[dict] = []
-    for user in users:
-        local_body = format_proposal_sms(
-            draft,
-            local_tz_name=user.timezone or "UTC",
-            partner_name=user.name.split()[0] if user.name else None,
-        )
-        try:
-            sid = await gateway.send(to_phone=user.phone_number, body=local_body)
-        except Exception as exc:
-            err = f"SMS delivery failed to {user.phone_number}: {exc}"
-            logger.warning(err)
+        results: list[dict] = []
+        for user in users:
+            local_body = format_proposal_sms(
+                draft,
+                local_tz_name=user.timezone or "UTC",
+                partner_name=user.name.split()[0] if user.name else None,
+            )
+            try:
+                sid = await gateway.send(to_phone=user.phone_number, body=local_body)
+            except Exception as exc:
+                err = f"SMS delivery failed to {user.phone_number}: {exc}"
+                logger.warning(err)
+                results.append({
+                    "user_id": user.id,
+                    "to": user.phone_number,
+                    "error": str(exc),
+                })
+                continue
+
             results.append({
                 "user_id": user.id,
                 "to": user.phone_number,
-                "error": str(exc),
+                "sid": sid,
+                "body": local_body,
             })
-            continue
 
-        results.append({
-            "user_id": user.id,
-            "to": user.phone_number,
-            "sid": sid,
-            "body": local_body,
-        })
-
-    return {"delivery_results": results}
+        return {"delivery_results": results}
+    except Exception as exc:
+        logger.exception("Error in deliver_sms: %s", exc)
+        return {"delivery_results": [], "errors": state.get("errors", []) + [f"deliver_sms: {exc}"]}
 
 
 async def send_clarification(state: dict, config: RunnableConfig) -> dict:
     """Send a clarification SMS to the sender (edit path fallback)."""
-    deps: GraphDeps = _deps(config).resolved()
-    gateway = deps.sms_gateway
-
-    msg = state.get("clarification_msg", "I didn't understand that request.")
-    body = format_clarification_sms(msg)
-
-    # Resolve the sender's phone number
-    user = await deps.couple_store.get_user(state["user_id"])
-    if user is None:
-        return {"errors": [f"User {state['user_id']} not found for clarification"]}
-
     try:
-        sid = await gateway.send(to_phone=user.phone_number, body=body)
-    except Exception as exc:
-        logger.warning("Clarification SMS failed to %s: %s", user.phone_number, exc)
-        return {"delivery_results": [{"error": str(exc)}], "clarification_sent": False}
+        deps: GraphDeps = _deps(config).resolved()
+        gateway = deps.sms_gateway
 
-    return {
-        "delivery_results": [{"user_id": user.id, "to": user.phone_number, "sid": sid, "body": body}],
-        "clarification_sent": True,
-    }
+        msg = state.get("clarification_msg", "I didn't understand that request.")
+        body = format_clarification_sms(msg)
+
+        # Resolve the sender's phone number
+        user = await deps.couple_store.get_user(state["user_id"])
+        if user is None:
+            return {"errors": state.get("errors", []) + [f"User {state['user_id']} not found for clarification"]}
+
+        try:
+            sid = await gateway.send(to_phone=user.phone_number, body=body)
+        except Exception as exc:
+            logger.warning("Clarification SMS failed to %s: %s", user.phone_number, exc)
+            return {"delivery_results": [{"error": str(exc)}], "clarification_sent": False}
+
+        return {
+            "delivery_results": [{"user_id": user.id, "to": user.phone_number, "sid": sid, "body": body}],
+            "clarification_sent": True,
+        }
+    except Exception as exc:
+        logger.exception("Error in send_clarification: %s", exc)
+        return {"clarification_sent": False, "errors": state.get("errors", []) + [f"send_clarification: {exc}"]}

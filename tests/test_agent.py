@@ -467,7 +467,18 @@ class TestClassifyReply:
     def test_stop_path(self):
         from app.agent.sms_graph import classify_reply
         assert classify_reply("stop") == "STOP"
-        assert classify_reply("mute these suggestions") == "STOP"
+
+    def test_mute_path(self):
+        from app.agent.sms_graph import classify_reply
+        assert classify_reply("mute") == "MUTE"
+        assert classify_reply("mute these suggestions") == "MUTE"
+        assert classify_reply("quiet") == "MUTE"
+
+    def test_unmute_path(self):
+        from app.agent.sms_graph import classify_reply
+        assert classify_reply("unmute") == "UNMUTE"
+        assert classify_reply("unmute me") == "UNMUTE"
+        assert classify_reply("resume") == "UNMUTE"
 
     def test_yes_path(self):
         from app.agent.sms_graph import classify_reply
@@ -562,8 +573,8 @@ class TestSMSGraph:
 
     @pytest.mark.asyncio
     async def test_stop_path(self, mock_deps, utc_now):
-        """STOP intent should mute suggestions."""
-        mock_deps.couple_store.set_muted = AsyncMock(return_value=None)
+        """STOP intent should reject the current proposal (no mute)."""
+        mock_deps.proposal_store.set_status = AsyncMock(return_value=None)
         result = await sms_graph.ainvoke(
             {
                 "from_phone": "+15551111111",
@@ -586,7 +597,63 @@ class TestSMSGraph:
             },
             {"configurable": {"deps": mock_deps}},
         )
+        mock_deps.proposal_store.set_status.assert_awaited_once_with(100, ProposalStatus.rejected)
+
+    @pytest.mark.asyncio
+    async def test_mute_path(self, mock_deps, utc_now):
+        """MUTE keyword should mute suggestions."""
+        mock_deps.couple_store.set_muted = AsyncMock(return_value=None)
+        result = await sms_graph.ainvoke(
+            {
+                "from_phone": "+15551111111",
+                "raw_body": "mute",
+                "couple_id": 1,
+                "user_id": 10,
+                "proposal_id": 100,
+                "intent": None,
+                "rating_parsed": None,
+                "edit": None,
+                "edit_valid": None,
+                "needs_clarification": None,
+                "clarification_msg": None,
+                "draft": None,
+                "proposal": None,
+                "sms_copy": None,
+                "delivery_results": [],
+                "clarification_sent": None,
+                "errors": [],
+            },
+            {"configurable": {"deps": mock_deps}},
+        )
         mock_deps.couple_store.set_muted.assert_awaited_once_with(1, muted=True)
+
+    @pytest.mark.asyncio
+    async def test_unmute_path(self, mock_deps, utc_now):
+        """UNMUTE keyword should unmute suggestions."""
+        mock_deps.couple_store.set_muted = AsyncMock(return_value=None)
+        result = await sms_graph.ainvoke(
+            {
+                "from_phone": "+15551111111",
+                "raw_body": "unmute",
+                "couple_id": 1,
+                "user_id": 10,
+                "proposal_id": 100,
+                "intent": None,
+                "rating_parsed": None,
+                "edit": None,
+                "edit_valid": None,
+                "needs_clarification": None,
+                "clarification_msg": None,
+                "draft": None,
+                "proposal": None,
+                "sms_copy": None,
+                "delivery_results": [],
+                "clarification_sent": None,
+                "errors": [],
+            },
+            {"configurable": {"deps": mock_deps}},
+        )
+        mock_deps.couple_store.set_muted.assert_awaited_once_with(1, muted=False)
 
     @pytest.mark.asyncio
     async def test_freeform_edit_no_tool_call(self, mock_deps, utc_now):
