@@ -109,7 +109,7 @@ class SMSState(TypedDict):
     couple_id: int | None
     user_id: int | None  # resolved sender
     proposal_id: int | None  # resolved pending proposal
-    intent: str | None  # "YES" | "NO" | "RERUN" | "STOP" | "EDIT" | "UNKNOWN"
+    intent: str | None  # "YES" | "NO" | "RERUN" | "STOP" | "EDIT" | "UNKNOWN" | "ONBOARDING"
 
     # --- Populated by classify_intent (rating branch) ---
     rating_parsed: int | str | None  # 1-5 or "SKIP", set by rating branch

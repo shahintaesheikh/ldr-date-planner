@@ -8,6 +8,8 @@ from app.models.couple import (
     DateActivity,
     Feedback,
     FeedbackSignal,
+    OnboardingSession,
+    OnboardingStep,
     Proposal,
     ProposalStatus,
     SMSThread,
@@ -32,4 +34,6 @@ __all__ = [
     "Feedback",
     "FeedbackSignal",
     "SMSThread",
+    "OnboardingSession",
+    "OnboardingStep",
 ]

@@ -108,32 +108,33 @@ async def google_auth_callback(
     code: str | None = None,
     state: str | None = None,
     error: str | None = None,
-) -> dict[str, str]:
+) -> RedirectResponse:
     """Handle the OAuth callback from Google.
 
     Exchanges the authorization code for access + refresh tokens, stores them
-    in the ``calendar_connections`` table, and returns a success response.
+    in the ``calendar_connections`` table, and redirects to a simple
+    "Connected!" page so the user can return to SMS.
 
-    On failure returns a JSON error body.
+    On failure redirects to a simple error page.
     """
     if error:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Google OAuth returned an error: {error}",
+        return RedirectResponse(
+            url="data:text/html," + _error_page(f"Google OAuth returned an error: {error}"),
+            status_code=303,
         )
 
     if not code or not state:
-        raise HTTPException(
-            status_code=400,
-            detail="Missing required OAuth parameters: code, state",
+        return RedirectResponse(
+            url="data:text/html," + _error_page("Missing OAuth parameters."),
+            status_code=303,
         )
 
     # Resolve the user_id from the stored state
     user_id = _oauth_states.pop(state, None)
     if user_id is None:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid or expired OAuth state parameter.  Please re-start the connection flow.",
+        return RedirectResponse(
+            url="data:text/html," + _error_page("Invalid or expired OAuth session. Please re-start the connection flow."),
+            status_code=303,
         )
 
     # Exchange the auth code for tokens
@@ -143,10 +144,10 @@ async def google_auth_callback(
     try:
         flow.fetch_token(code=code)
     except Exception as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Failed to exchange authorization code for tokens: {exc}",
-        ) from exc
+        return RedirectResponse(
+            url="data:text/html," + _error_page(f"Failed to connect: {exc}"),
+            status_code=303,
+        )
 
     creds = flow.credentials
 
@@ -177,8 +178,57 @@ async def google_auth_callback(
 
         await session.commit()
 
-    return {
-        "status": "success",
-        "message": "Google Calendar connected successfully",
-        "user_id": str(user_id),
-    }
+    return RedirectResponse(
+        url="data:text/html," + _success_page(),
+        status_code=303,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Inline HTML pages for the redirect (no static HTML, no React frontend)
+# ---------------------------------------------------------------------------
+
+
+def _success_page() -> str:
+    """A simple "Connected!" page shown after successful Google OAuth."""
+    import urllib.parse
+
+    html = """<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Connected!</title>
+<style>
+  body { font-family: -apple-system, sans-serif; text-align: center; padding: 40px 20px; }
+  h1 { color: #2e7d32; font-size: 24px; }
+  p { color: #555; font-size: 16px; }
+</style>
+</head>
+<body>
+  <h1>✅ Connected!</h1>
+  <p>Your Google Calendar is linked. You can close this page and return to SMS.</p>
+</body>
+</html>"""
+    return urllib.parse.quote(html)
+
+
+def _error_page(reason: str) -> str:
+    """A simple error page shown when Google OAuth fails."""
+    import urllib.parse
+
+    html = f"""<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Connection Failed</title>
+<style>
+  body {{ font-family: -apple-system, sans-serif; text-align: center; padding: 40px 20px; }}
+  h1 {{ color: #c62828; font-size: 24px; }}
+  p {{ color: #555; font-size: 16px; }}
+</style>
+</head>
+<body>
+  <h1>❌ Connection Failed</h1>
+  <p>{{ reason }}</p>
+  <p>Please try again from the SMS conversation.</p>
+</body>
+</html>"""
+    return urllib.parse.quote(html)

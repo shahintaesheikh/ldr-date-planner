@@ -147,6 +147,9 @@ def mock_deps(utc_now) -> GraphDeps:
     # --- Feedback store ---
     deps.feedback_store.log = AsyncMock(return_value=None)
 
+    # --- Onboarding store ---
+    deps.onboarding_store.get_by_phone = AsyncMock(return_value=None)
+
     # --- SMS thread store ---
     deps.sms_thread_store.append = AsyncMock(return_value=None)
 

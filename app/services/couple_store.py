@@ -4,6 +4,9 @@ The agent nodes need to resolve phone numbers (for ``deliver_sms``), map an
 inbound SMS sender phone to a user + couple (``classify_intent``), and flip
 mute state (``route_stop``). This service is the single entry point for those
 reads/writes; nodes never touch the ORM session directly.
+
+The onboarding flow uses ``create_user`` and ``create_couple`` to materialise
+users and the couple row once the partner confirms (see ``.pi/sms-auth.md``).
 """
 
 from sqlalchemy import select
@@ -88,6 +91,32 @@ class CoupleStore:
     # ------------------------------------------------------------------
     # Write
     # ------------------------------------------------------------------
+
+    async def create_user(self, name: str, phone_number: str) -> User:
+        """Create a user row (used by the SMS onboarding flow).
+
+        The phone number must be unique (E.164).  Timezone defaults to
+        ``"UTC"`` and can be refined later.
+        """
+        user = User(name=name, phone_number=phone_number)
+        self._session.add(user)
+        await self._session.flush()
+        return user
+
+    async def create_couple(
+        self, partner_a_user_id: int, partner_b_user_id: int
+    ) -> Couple:
+        """Create a couple row linking two users.
+
+        Used by the onboarding flow once the partner confirms the RSVP.
+        """
+        couple = Couple(
+            partner_a_user_id=partner_a_user_id,
+            partner_b_user_id=partner_b_user_id,
+        )
+        self._session.add(couple)
+        await self._session.flush()
+        return couple
 
     async def set_muted(self, couple_id: int, muted: bool) -> Couple | None:
         """Set a couple's ``suggestions_muted`` flag (STOP / re-enable)."""
