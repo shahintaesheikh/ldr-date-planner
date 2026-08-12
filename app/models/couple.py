@@ -8,9 +8,11 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Integer,
+    JSON,
     String,
     Text,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -50,6 +52,20 @@ class ProposalStatus(PyEnum):
     confirmed = "confirmed"
     rejected = "rejected"
     expired = "expired"
+
+
+class OnboardingStep(PyEnum):
+    await_name = "await_name"
+    await_partner_phone = "await_partner_phone"
+    await_partner_name = "await_partner_name"
+    await_partner_confirm = "await_partner_confirm"
+    await_calendar_choice = "await_calendar_choice"
+    await_google_done = "await_google_done"
+    await_apple_email = "await_apple_email"
+    await_apple_password = "await_apple_password"
+    await_traits_activity = "await_traits_activity"
+    await_traits_energy = "await_traits_energy"
+    complete = "complete"
 
 
 class FeedbackSignal(PyEnum):
@@ -273,6 +289,31 @@ class SMSThread(Base):
     proposal: Mapped["Proposal"] = relationship(back_populates="sms_threads")
 
 
+class OnboardingSession(Base):
+    __tablename__ = "onboarding_sessions"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    phone_number: Mapped[str] = mapped_column(
+        String(32), unique=True, nullable=False
+    )
+    step: Mapped[OnboardingStep] = mapped_column(
+        Enum(OnboardingStep, name="onboarding_step"),
+        nullable=False,
+        server_default=OnboardingStep.await_name.name,
+    )
+    # Accumulated data (JSONB) — name, partner_phone, apple_email, traits, etc.
+    data: Mapped[dict] = mapped_column(
+        JSON, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(),
+        onupdate=func.now(), nullable=False
+    )
+
+
 # Export all models for Alembic and import convenience
 __all__ = [
     "Base",
@@ -284,4 +325,6 @@ __all__ = [
     "Proposal",
     "Feedback",
     "SMSThread",
+    "OnboardingStep",
+    "OnboardingSession",
 ]

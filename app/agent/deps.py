@@ -31,6 +31,7 @@ from app.services import (
     CatalogService,
     CoupleStore,
     FeedbackStore,
+    OnboardingStore,
     ProposalStore,
     SMSThreadStore,
     TraitStore,
@@ -76,6 +77,7 @@ class GraphDeps:
     sms_thread_store: SMSThreadStore | None = None
     couple_store: CoupleStore | None = None
     feedback_store: FeedbackStore | None = None
+    onboarding_store: OnboardingStore | None = None
     calendar_resolver: CalendarResolver | None = None
     catalog: CatalogService = catalog_service  # stateless singleton
 
@@ -102,6 +104,8 @@ class GraphDeps:
             self.couple_store = CoupleStore(self.db)
         if self.feedback_store is None:
             self.feedback_store = FeedbackStore(self.db)
+        if self.onboarding_store is None:
+            self.onboarding_store = OnboardingStore(self.db)
         if self.calendar_resolver is None:
             self.calendar_resolver = CalendarResolver()
         return self

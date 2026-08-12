@@ -38,8 +38,14 @@ from app.agent.common import (
 from app.agent.deps import _deps
 from app.agent.state import ProposalDraft, SMSState
 from app.agent.tools import ProposalEdit
-from app.models import FeedbackSignal, ProposalStatus
+from app.models import (
+    FeedbackSignal,
+    OnboardingStep,
+    ProposalStatus,
+    TraitSource,
+)
 from app.schemas.proposal import ProposalUpdate
+from app.schemas.trait import TraitCreate
 from app.services.feedback_attribution import FeedbackAttribution
 
 logger = logging.getLogger(__name__)
@@ -106,15 +112,24 @@ def parse_rating_reply(raw_body: str) -> int | str | None:
 def classify_reply(raw_body: str) -> str:
     """Fast-path intent classification.
 
-    Priority: RERUN > UNMUTE > MUTE > STOP > YES > NO > EDIT.
+    Priority: ONBOARDING > RERUN > UNMUTE > MUTE > STOP > YES > NO > EDIT.
     A reply like "no, try again" routes to RERUN, not NO.
     RUN-style triggers ("run", "ideate", "new date", …) are aliases for
     RERUN — they all route to ``route_rerun``, which invokes the ideation
     graph: fresh when no proposal is pending, reject-and-rerun otherwise.
+
+    ``ONBOARDING`` is returned for JOIN/START/SIGN UP keywords regardless of
+    whether the user is already known — the ``onboarding_node`` handles the
+    distinction (see ``.pi/sms-auth.md``).
     """
     body = raw_body.strip().lower()
     if not body:
         return "EDIT"
+
+    # Onboarding keywords (checked before user resolution in classify_intent).
+    if body in ("join", "start", "sign up"):
+        return "ONBOARDING"
+
     if _RERUN_RE.search(body):
         return "RERUN"
     if _UNMUTE_RE.search(body):
@@ -136,18 +151,47 @@ def classify_reply(raw_body: str) -> str:
 
 
 async def classify_intent(state: dict, config: RunnableConfig) -> dict:
-    """Resolve sender + proposal, append to the sms_thread, and classify intent."""
+    """Resolve sender + proposal, append to the sms_thread, and classify intent.
+
+    Onboarding flow (``.pi/sms-auth.md``):
+
+    1. If the raw body is a JOIN/START/SIGN UP keyword, always route to
+       ``onboarding_node`` regardless of whether the user is known.
+    2. If the sender is unknown (no user row), check for an existing
+       onboarding session — if one exists, route to ``onboarding_node``
+       (this handles partner confirmation replies like "YES" from Bob).
+    3. Otherwise, return UNKNOWN (no user, no session).
+    """
     try:
         deps = _deps(config).resolved()
 
+        # Step 1: Onboarding keywords always go to onboarding_node.
+        body = state["raw_body"].strip().lower()
+        if body in ("join", "start", "sign up"):
+            return {"intent": "ONBOARDING"}
+
         user = await deps.couple_store.get_user_by_phone(state["from_phone"])
         if user is None:
+            # Step 2: Unknown sender with an active session → onboarding_node.
+            session = await deps.onboarding_store.get_by_phone(
+                state["from_phone"]
+            )
+            if session is not None:
+                return {"intent": "ONBOARDING"}
+            # Step 3: Truly unknown.
             return {
                 "intent": "UNKNOWN",
                 "needs_clarification": True,
                 "clarification_msg": "I don't recognise that phone number.",
                 "errors": [f"No user found for phone {state['from_phone']}"],
             }
+
+        # Known user mid-onboarding (has a user row but no couple yet).
+        session = await deps.onboarding_store.get_by_phone(
+            state["from_phone"]
+        )
+        if session is not None and session.step != OnboardingStep.complete:
+            return {"intent": "ONBOARDING"}
 
         couple = await deps.couple_store.get_couple_for_user(user.id)
         if couple is None:
@@ -209,7 +253,8 @@ def _route_on_intent(
     state: dict,
 ) -> Literal[
     "route_yes", "route_no", "route_rerun", "route_stop", "route_mute",
-    "route_unmute", "route_rating", "edit_proposal", "send_clarification"
+    "route_unmute", "route_rating", "edit_proposal", "onboarding_node",
+    "send_clarification"
 ]:
     """Conditional router after classify_intent."""
     return {
@@ -221,6 +266,7 @@ def _route_on_intent(
         "UNMUTE": "route_unmute",
         "RATING": "route_rating",
         "EDIT": "edit_proposal",
+        "ONBOARDING": "onboarding_node",
         "UNKNOWN": "send_clarification",
     }.get(state.get("intent"), "send_clarification")
 
@@ -633,6 +679,502 @@ def _route_after_validate(
 
 
 # =========================================================================
+# Onboarding node
+# =========================================================================
+
+
+async def onboarding_node(state: dict, config: RunnableConfig) -> dict:
+    """SMS-native onboarding flow (``.pi/sms-auth.md``).
+
+    A single deterministic node (not a sub-graph) that reads the
+    ``onboarding_sessions`` row by ``from_phone`` and switch-cases on
+    ``session.step``.  Sends SMS replies directly via ``deps.sms_gateway``.
+
+    The node handles all 9 onboarding steps, from welcome (``await_name``)
+    through partner confirmation, calendar choice, and traits, to
+    ``complete``.
+    """
+    try:
+        deps = _deps(config).resolved()
+        gateway = deps.sms_gateway
+        phone = state["from_phone"]
+        body = state["raw_body"].strip()
+
+        session = await deps.onboarding_store.get_by_phone(phone)
+
+        # ── No session yet → create one and start onboarding ──
+        if session is None:
+            session = await deps.onboarding_store.create(
+                phone_number=phone,
+                step=OnboardingStep.await_name,
+            )
+            await gateway.send(
+                phone,
+                "Welcome to LDR Date Planner! What's your name?",
+            )
+            return {}
+
+        # Read the accumulated data.
+        data = dict(session.data or {})
+
+        # ── Switch on session step ──
+        step = session.step
+
+        # ── Resume: user texts JOIN/START/SIGN UP when session already exists ──
+        # Re-prompt for the current step instead of treating the keyword as
+        # the answer to the current question.
+        resume_keywords = {"join", "start", "sign up"}
+        if body.lower().strip() in resume_keywords:
+            await gateway.send(
+                phone,
+                _resume_prompt(step, data),
+            )
+            return {}
+
+        if step == OnboardingStep.await_name:
+            # Store name, create user, ask for partner's phone.
+            name = body
+            user = await deps.couple_store.create_user(
+                name=name, phone_number=phone
+            )
+            await deps.onboarding_store.advance_step(
+                phone,
+                OnboardingStep.await_partner_phone,
+                data_updates={"name": name, "user_id": user.id},
+            )
+            await gateway.send(
+                phone,
+                f"Nice to meet you, {name.split()[0]}! "
+                f"What's your partner's phone number?",
+            )
+
+        elif step == OnboardingStep.await_partner_phone:
+            # Store partner's phone, ask for partner's name.
+            partner_phone = body
+            await deps.onboarding_store.advance_step(
+                phone,
+                OnboardingStep.await_partner_name,
+                data_updates={"partner_phone": partner_phone},
+            )
+            await gateway.send(
+                phone,
+                "And what's their name?",
+            )
+
+        elif step == OnboardingStep.await_partner_name:
+            # Store partner's name, create partner's session, text partner.
+            partner_name = body
+            partner_phone = data.get("partner_phone", "")
+
+            await deps.onboarding_store.advance_step(
+                phone,
+                OnboardingStep.await_partner_confirm,
+                data_updates={"partner_name": partner_name},
+            )
+
+            # Create partner's onboarding session (await_partner_confirm).
+            partner_session = await deps.onboarding_store.create(
+                phone_number=partner_phone,
+                step=OnboardingStep.await_partner_confirm,
+                data={
+                    "partner_name": data.get("name", ""),
+                    "partner_phone": phone,
+                    "partner_user_id": data.get("user_id"),
+                },
+            )
+
+            # Text the partner.
+            await gateway.send(
+                partner_phone,
+                f"{data.get('name', 'Someone')} wants to connect with you "
+                f"on LDR Date Planner! Reply YES to confirm.",
+            )
+
+            # Tell the user they're on hold.
+            await gateway.send(
+                phone,
+                f"📨 We've texted {partner_name} to confirm. "
+                f"You're on hold until they reply.",
+            )
+
+        elif step == OnboardingStep.await_partner_confirm:
+            # Partner is replying to the confirmation request.
+            if body.lower() in ("yes", "yeah", "yep", "sure", "confirm"):
+                # Resolve the initiator's user_id from stored data.
+                # ``partner_user_id`` in this session is the initiator's
+                # user_id (set when the partner's session was created).
+                initiator_user_id = data.get("partner_user_id")
+                initiator_phone = data.get("partner_phone", "")
+                initiator_name = data.get("partner_name", "")
+
+                # Create the current user (Bob) if they don't have an
+                # account yet.
+                current_user = await deps.couple_store.get_user_by_phone(phone)
+                if current_user is None:
+                    current_user = await deps.couple_store.create_user(
+                        name=initiator_name or "Partner",
+                        phone_number=phone,
+                    )
+                current_user_id = current_user.id
+
+                if initiator_user_id is None:
+                    await gateway.send(
+                        phone,
+                        "Sorry, something went wrong finding your partner. "
+                        "Please try again later.",
+                    )
+                    return {
+                        "errors": [
+                            "onboarding_node: initiator_user_id not found"
+                        ]
+                    }
+
+                # Create the couple (initiator is partner_a).
+                await deps.couple_store.create_couple(
+                    partner_a_user_id=initiator_user_id,
+                    partner_b_user_id=current_user_id,
+                )
+
+                # Advance the current user's session to calendar choice.
+                await deps.onboarding_store.advance_step(
+                    phone,
+                    OnboardingStep.await_calendar_choice,
+                    data_updates={"user_id": current_user_id},
+                )
+
+                # Advance the initiator's session to calendar choice.
+                initiator_session = await deps.onboarding_store.get_by_phone(
+                    initiator_phone
+                )
+                if initiator_session is not None:
+                    await deps.onboarding_store.advance_step(
+                        initiator_phone,
+                        OnboardingStep.await_calendar_choice,
+                    )
+
+                # Tell the current user they're connected.
+                await gateway.send(
+                    phone,
+                    f"You're connected with {initiator_name or 'your partner'}! "
+                    f"Do you use Google Calendar or Apple Calendar? "
+                    f"Reply \"google\", \"apple\", or \"skip\" "
+                    f"to do it later.",
+                )
+
+                # Notify the initiator.
+                await gateway.send(
+                    initiator_phone,
+                    f"{initiator_name or 'Your partner'} confirmed! "
+                    f"You're connected. "
+                    f"Do you use Google Calendar or Apple Calendar? "
+                    f"Reply \"google\", \"apple\", or \"skip\" "
+                    f"to do it later.",
+                )
+            else:
+                # Partner declined or sent something else.
+                await gateway.send(
+                    phone,
+                    "That's okay, text JOIN when you're ready.",
+                )
+
+        elif step == OnboardingStep.await_calendar_choice:
+            choice = body.lower().strip()
+
+            if choice == "google":
+                user_id = data.get("user_id")
+                await deps.onboarding_store.advance_step(
+                    phone,
+                    OnboardingStep.await_google_done,
+                )
+                await gateway.send(
+                    phone,
+                    f"📱 Open this link in your browser to connect "
+                    f"Google Calendar:\n"
+                    f"https://example.com/auth/google?user_id={user_id}\n"
+                    f"Text DONE when you're finished.",
+                )
+            elif choice == "apple":
+                await deps.onboarding_store.advance_step(
+                    phone,
+                    OnboardingStep.await_apple_email,
+                )
+                await gateway.send(
+                    phone,
+                    "Apple Calendar needs an app-specific password "
+                    "(not your normal Apple password). To create one: "
+                    "sign in at appleid.apple.com → Security → "
+                    "App-Specific Passwords → generate one. Then text me "
+                    "your Apple ID email.",
+                )
+            elif choice in ("skip", "none", "later"):
+                await deps.onboarding_store.advance_step(
+                    phone,
+                    OnboardingStep.await_traits_activity,
+                )
+                await gateway.send(
+                    phone,
+                    "No problem — you can connect later. Now, what kind "
+                    "of dates do you like? Reply numbers:\n"
+                    "1 = Virtual tours, 2 = Games, 3 = Cooking, "
+                    "4 = Movies, 5 = Outdoors",
+                )
+            else:
+                await gateway.send(
+                    phone,
+                    "Please reply \"google\", \"apple\", or \"skip\".",
+                )
+
+        elif step == OnboardingStep.await_google_done:
+            if body.lower() == "done":
+                await deps.onboarding_store.advance_step(
+                    phone,
+                    OnboardingStep.await_traits_activity,
+                )
+                await gateway.send(
+                    phone,
+                    "Connected! 🎉 What kind of dates do you like? "
+                    "Reply numbers:\n"
+                    "1 = Virtual tours, 2 = Games, 3 = Cooking, "
+                    "4 = Movies, 5 = Outdoors",
+                )
+            else:
+                await gateway.send(
+                    phone,
+                    "Text DONE when you've finished in the browser.",
+                )
+
+        elif step == OnboardingStep.await_apple_email:
+            email = body
+            await deps.onboarding_store.advance_step(
+                phone,
+                OnboardingStep.await_apple_password,
+                data_updates={"apple_email": email},
+            )
+            await gateway.send(
+                phone,
+                "Got it. Now text me the app-specific password "
+                "(format: xxxx-xxxx-xxxx-xxxx).",
+            )
+
+        elif step == OnboardingStep.await_apple_password:
+            password = body
+            user_id = data.get("user_id")
+            apple_email = data.get("apple_email", "")
+
+            if user_id is None:
+                await gateway.send(
+                    phone,
+                    "Sorry, something went wrong. Please start over "
+                    "by texting JOIN.",
+                )
+                return {"errors": ["onboarding_node: user_id not found for apple_connect"]}
+
+            from app.services.calendar_connector import connect_apple
+
+            success, msg = await connect_apple(
+                deps.db, user_id, apple_email, password
+            )
+
+            if success:
+                await deps.onboarding_store.advance_step(
+                    phone,
+                    OnboardingStep.await_traits_activity,
+                )
+                await gateway.send(
+                    phone,
+                    "✅ Connected to Apple Calendar! "
+                    "What kind of dates do you like? Reply numbers:\n"
+                    "1 = Virtual tours, 2 = Games, 3 = Cooking, "
+                    "4 = Movies, 5 = Outdoors",
+                )
+            else:
+                await gateway.send(phone, msg)
+
+        elif step == OnboardingStep.await_traits_activity:
+            # Parse comma-separated numbers.
+            selections = [
+                s.strip() for s in body.split(",")
+                if s.strip() in ("1", "2", "3", "4", "5")
+            ]
+            if not selections:
+                await gateway.send(
+                    phone,
+                    "Please reply with numbers like \"1, 3, 4\" "
+                    "from the list: 1 = Virtual tours, 2 = Games, "
+                    "3 = Cooking, 4 = Movies, 5 = Outdoors",
+                )
+                return {}
+
+            activity_map = {
+                "1": "virtual_tours",
+                "2": "games",
+                "3": "cooking",
+                "4": "movies",
+                "5": "outdoors",
+            }
+            selected_activities = [
+                activity_map[s] for s in selections
+            ]
+
+            await deps.onboarding_store.advance_step(
+                phone,
+                OnboardingStep.await_traits_energy,
+                data_updates={"activity_prefs": selected_activities},
+            )
+            await gateway.send(
+                phone,
+                "How much energy for a date? "
+                "1 = Low (chill), 2 = Medium, 3 = High",
+            )
+
+        elif step == OnboardingStep.await_traits_energy:
+            energy = body.strip()
+            if energy not in ("1", "2", "3"):
+                await gateway.send(
+                    phone,
+                    "Please reply 1 (Low), 2 (Medium), or 3 (High).",
+                )
+                return {}
+
+            energy_map = {"1": "low", "2": "medium", "3": "high"}
+            energy_val = energy_map[energy]
+
+            # Resolve the couple_id from the user.
+            user_id = data.get("user_id")
+            if user_id is None:
+                await gateway.send(
+                    phone,
+                    "Sorry, something went wrong. Please start over "
+                    "by texting JOIN.",
+                )
+                return {"errors": ["onboarding_node: user_id not found"]}
+
+            couple = await deps.couple_store.get_couple_for_user(user_id)
+            if couple is None:
+                await gateway.send(
+                    phone,
+                    "Sorry, something went wrong. Please start over "
+                    "by texting JOIN.",
+                )
+                return {"errors": ["onboarding_node: couple not found for user"]}
+
+            couple_id = couple.id
+
+            # Write traits via TraitStore.
+            activity_prefs = data.get("activity_prefs", [])
+            if activity_prefs:
+                await deps.trait_store.upsert_trait(
+                    couple_id=couple_id,
+                    data=TraitCreate(
+                        trait_key="activity_type_pref",
+                        value=",".join(activity_prefs),
+                        weight=1.0,
+                        source=TraitSource.explicit,
+                    ),
+                )
+
+            await deps.trait_store.upsert_trait(
+                couple_id=couple_id,
+                data=TraitCreate(
+                    trait_key="energy_pref",
+                    value=energy_val,
+                    weight=1.0,
+                    source=TraitSource.explicit,
+                ),
+            )
+
+            await deps.onboarding_store.advance_step(
+                phone,
+                OnboardingStep.complete,
+                data_updates={"energy_pref": energy_val},
+            )
+            await gateway.send(
+                phone,
+                "You're all set! We'll send you a date idea soon. 🎉",
+            )
+
+        elif step == OnboardingStep.complete:
+            # No-op — session is done. Send a friendly reminder.
+            await gateway.send(
+                phone,
+                "You're already set up! We'll send you a date idea soon. 🎉",
+            )
+
+        else:
+            logger.warning(
+                "onboarding_node: unknown step %s for phone %s",
+                step, phone,
+            )
+            await gateway.send(
+                phone,
+                "Sorry, something went wrong. Please text JOIN to start over.",
+            )
+
+        return {}
+
+    except Exception as exc:
+        logger.exception("Error in onboarding_node: %s", exc)
+        return {
+            "errors": state.get("errors", []) + [f"onboarding_node: {exc}"]
+        }
+
+
+# =========================================================================
+# Resume prompt helper
+# =========================================================================
+
+
+def _resume_prompt(step: OnboardingStep, data: dict) -> str:
+    """Return an appropriate re-prompt message when a user texts JOIN to
+    resume an interrupted onboarding session."""
+    prompts = {
+        OnboardingStep.await_name: (
+            "Welcome back! Let's pick up where you left off. What's your name?"
+        ),
+        OnboardingStep.await_partner_phone: (
+            "Welcome back! What's your partner's phone number?"
+        ),
+        OnboardingStep.await_partner_name: (
+            "Welcome back! And what's their name?"
+        ),
+        OnboardingStep.await_partner_confirm: (
+            "You're waiting for your partner to confirm. "
+            "We'll let you know when they reply!"
+        ),
+        OnboardingStep.await_calendar_choice: (
+            "Welcome back! Do you use Google Calendar or Apple Calendar? "
+            "Reply \"google\", \"apple\", or \"skip\" to do it later."
+        ),
+        OnboardingStep.await_google_done: (
+            "Welcome back! Did you finish connecting Google Calendar? "
+            "Text DONE when you're finished."
+        ),
+        OnboardingStep.await_apple_email: (
+            "Welcome back! Please text me your Apple ID email."
+        ),
+        OnboardingStep.await_apple_password: (
+            "Welcome back! Please text me the app-specific password "
+            "(format: xxxx-xxxx-xxxx-xxxx)."
+        ),
+        OnboardingStep.await_traits_activity: (
+            "Welcome back! What kind of dates do you like? Reply numbers:\n"
+            "1 = Virtual tours, 2 = Games, 3 = Cooking, "
+            "4 = Movies, 5 = Outdoors"
+        ),
+        OnboardingStep.await_traits_energy: (
+            "Welcome back! How much energy for a date? "
+            "1 = Low (chill), 2 = Medium, 3 = High"
+        ),
+        OnboardingStep.complete: (
+            "You're already set up! We'll send you a date idea soon. 🎉"
+        ),
+    }
+    return prompts.get(
+        step, "Welcome back! Text JOIN to start or continue."
+    )
+
+
+# =========================================================================
 # Graph builder
 # =========================================================================
 
@@ -651,6 +1193,7 @@ def build_sms_graph():
     graph.add_node("route_rating", route_rating)
     graph.add_node("edit_proposal", edit_proposal)
     graph.add_node("validate_edit", validate_edit)
+    graph.add_node("onboarding_node", onboarding_node)
     graph.add_node("send_clarification", send_clarification)
     graph.add_node("compose_proposal", compose_proposal)
     graph.add_node("deliver_sms", deliver_sms)
@@ -668,6 +1211,7 @@ def build_sms_graph():
             "route_unmute": "route_unmute",
             "route_rating": "route_rating",
             "edit_proposal": "edit_proposal",
+            "onboarding_node": "onboarding_node",
             "send_clarification": "send_clarification",
         },
     )
@@ -678,6 +1222,7 @@ def build_sms_graph():
     graph.add_edge("route_mute", END)
     graph.add_edge("route_unmute", END)
     graph.add_edge("route_rating", END)
+    graph.add_edge("onboarding_node", END)
     graph.add_edge("edit_proposal", "validate_edit")
     graph.add_conditional_edges(
         "validate_edit",

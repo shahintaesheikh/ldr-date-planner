@@ -397,7 +397,11 @@ async def deliver_sms(state: dict, config: RunnableConfig) -> dict:
 
 
 async def send_clarification(state: dict, config: RunnableConfig) -> dict:
-    """Send a clarification SMS to the sender (edit path fallback)."""
+    """Send a clarification SMS to the sender (edit path fallback).
+
+    Falls back to ``state["from_phone"]`` when the sender is not a known
+    user (e.g. UNKNOWN phone number path).
+    """
     try:
         deps: GraphDeps = _deps(config).resolved()
         gateway = deps.sms_gateway
@@ -405,19 +409,33 @@ async def send_clarification(state: dict, config: RunnableConfig) -> dict:
         msg = state.get("clarification_msg", "I didn't understand that request.")
         body = format_clarification_sms(msg)
 
-        # Resolve the sender's phone number
-        user = await deps.couple_store.get_user(state["user_id"])
-        if user is None:
-            return {"errors": state.get("errors", []) + [f"User {state['user_id']} not found for clarification"]}
+        # Resolve the sender's phone number — fall back to from_phone for
+        # unknown senders.
+        to_phone: str | None = None
+        user_id = state.get("user_id")
+        if user_id is not None:
+            user = await deps.couple_store.get_user(user_id)
+            if user is not None:
+                to_phone = user.phone_number
+
+        if to_phone is None:
+            to_phone = state.get("from_phone")
+
+        if not to_phone:
+            return {
+                "errors": state.get("errors", []) + [
+                    "send_clarification: no user_id or from_phone in state"
+                ]
+            }
 
         try:
-            sid = await gateway.send(to_phone=user.phone_number, body=body)
+            sid = await gateway.send(to_phone=to_phone, body=body)
         except Exception as exc:
-            logger.warning("Clarification SMS failed to %s: %s", user.phone_number, exc)
+            logger.warning("Clarification SMS failed to %s: %s", to_phone, exc)
             return {"delivery_results": [{"error": str(exc)}], "clarification_sent": False}
 
         return {
-            "delivery_results": [{"user_id": user.id, "to": user.phone_number, "sid": sid, "body": body}],
+            "delivery_results": [{"user_id": user_id, "to": to_phone, "sid": sid, "body": body}],
             "clarification_sent": True,
         }
     except Exception as exc:
