@@ -50,7 +50,8 @@ logger = logging.getLogger(__name__)
 
 _RERUN_RE = re.compile(
     r"\b(rerun|try again|something else|another one|different idea|"
-    r"new idea|again)\b",
+    r"new idea|again|run|ideate|propose|new date|date idea|"
+    r"plan a date|suggest a date|give me an idea|give us an idea)\b",
     re.IGNORECASE,
 )
 _STOP_RE = re.compile(
@@ -107,6 +108,9 @@ def classify_reply(raw_body: str) -> str:
 
     Priority: RERUN > UNMUTE > MUTE > STOP > YES > NO > EDIT.
     A reply like "no, try again" routes to RERUN, not NO.
+    RUN-style triggers ("run", "ideate", "new date", …) are aliases for
+    RERUN — they all route to ``route_rerun``, which invokes the ideation
+    graph: fresh when no proposal is pending, reject-and-rerun otherwise.
     """
     body = raw_body.strip().lower()
     if not body:

@@ -464,6 +464,30 @@ class TestClassifyReply:
         assert classify_reply("try again") == "RERUN"
         assert classify_reply("something else please") == "RERUN"
 
+    def test_run_path(self):
+        """RUN-style triggers are aliases for RERUN."""
+        from app.agent.sms_graph import classify_reply
+        assert classify_reply("run") == "RERUN"
+        assert classify_reply("ideate") == "RERUN"
+        assert classify_reply("propose") == "RERUN"
+        assert classify_reply("new date") == "RERUN"
+        assert classify_reply("date idea") == "RERUN"
+        assert classify_reply("plan a date") == "RERUN"
+        assert classify_reply("suggest a date") == "RERUN"
+        assert classify_reply("give me an idea") == "RERUN"
+        assert classify_reply("give us an idea") == "RERUN"
+
+    def test_run_does_not_break_yes(self):
+        """RUN regex should not steal existing intents."""
+        from app.agent.sms_graph import classify_reply
+        assert classify_reply("yes") == "YES"
+        assert classify_reply("go for it") == "YES"
+        assert classify_reply("no") == "NO"
+        assert classify_reply("stop") == "STOP"
+        assert classify_reply("mute") == "MUTE"
+        assert classify_reply("unmute") == "UNMUTE"
+        assert classify_reply("rerun") == "RERUN"
+
     def test_stop_path(self):
         from app.agent.sms_graph import classify_reply
         assert classify_reply("stop") == "STOP"

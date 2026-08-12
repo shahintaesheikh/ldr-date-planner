@@ -8,7 +8,6 @@ from app.routers import (
     catalog_router,
     google_auth_router,
     health_router,
-    propose_router,
     twilio_router,
 )
 from app.services.cadence_scheduler import start_scheduler, stop_scheduler
@@ -35,5 +34,4 @@ app = FastAPI(
 app.include_router(catalog_router)
 app.include_router(google_auth_router)
 app.include_router(health_router)
-app.include_router(propose_router)
 app.include_router(twilio_router)
