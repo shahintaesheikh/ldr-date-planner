@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters import CalDAVAdapter, CalendarAdapter, GoogleCalendarAdapter
@@ -110,3 +110,44 @@ class CalendarResolver:
             )
 
         raise ValueError(f"Unknown calendar provider: {conn.provider}")
+
+    async def persist_tokens(
+        self, db: AsyncSession, resolved: list[ResolvedCalendar]
+    ) -> None:
+        """Persist any refreshed OAuth tokens back to the database.
+
+        Call this *after* using the adapters returned by
+        ``get_active_adapters()``.  Google tokens are refreshed in-memory
+        when the access token expires; this method writes them back to
+        the ``calendar_connections`` table so the refresh is not lost on
+        restart.
+
+        CalDAV adapters have no token to persist (password-based auth).
+        """
+        for rc in resolved:
+            adapter = rc.adapter
+            if not isinstance(adapter, GoogleCalendarAdapter):
+                continue
+
+            refreshed_json = adapter.token_json
+            # Only persist if the token actually changed (i.e. was refreshed).
+            # We check against the DB value to avoid unnecessary writes.
+            result = await db.execute(
+                select(CalendarConnection.oauth_token).where(
+                    CalendarConnection.user_id == rc.user_id,
+                    CalendarConnection.provider == CalendarProvider.google,
+                    CalendarConnection.status == ConnectionStatus.active,
+                )
+            )
+            current_token = result.scalar_one_or_none()
+            if current_token is None or current_token == refreshed_json:
+                continue
+
+            await db.execute(
+                update(CalendarConnection)
+                .where(
+                    CalendarConnection.user_id == rc.user_id,
+                    CalendarConnection.provider == CalendarProvider.google,
+                )
+                .values(oauth_token=refreshed_json)
+            )

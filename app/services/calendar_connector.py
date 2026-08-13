@@ -1,16 +1,17 @@
 """Calendar connection helpers for the SMS onboarding flow.
 
-Provides two functions used by ``onboarding_node``:
+Provides one function used by ``onboarding_node``:
 
-- ``connect_google(user_id, code)`` — validates Google OAuth token, stores
-  ``CalendarConnection``.  (The OAuth flow itself is handled by the browser
-  redirect; ``code`` is the authorization code from the callback.)
 - ``connect_apple(user_id, email, password)`` — validates via a real PROPFIND
   against the iCloud CalDAV server, then stores ``CalendarConnection``.
 
 Apple passwords are validated at entry time (not deferred) so typos are caught
 immediately — the user re-texts a corrected password in the same turn, rather
 than finding out days later on the first date-availability check.
+
+Google connections are handled by the OAuth flow (``/auth/google`` →
+``/auth/google/callback`` in ``app/routers/google_auth.py``); no helper is
+needed here.
 
 See ``.pi/sms-auth.md`` § "Design Decisions" for the rationale.
 """
@@ -104,46 +105,3 @@ async def connect_apple(
 
     await db.flush()
     return True, ""
-
-
-async def connect_google(
-    db: AsyncSession,
-    user_id: int,
-    oauth_token_json: str,
-    refresh_token: str | None = None,
-) -> None:
-    """Store or update a Google Calendar connection after successful OAuth.
-
-    The OAuth flow itself is handled by the browser redirect
-    (``/auth/google?user_id=...``).  This function is called by the callback
-    route after the token exchange succeeds.
-
-    Args:
-        db: Database session (must be in an active transaction).
-        user_id: The user's id.
-        oauth_token_json: The ``Credentials.to_json()`` string.
-        refresh_token: The OAuth refresh token (may be ``None``).
-    """
-    result = await db.execute(
-        select(CalendarConnection).where(
-            CalendarConnection.user_id == user_id,
-            CalendarConnection.provider == CalendarProvider.google,
-        )
-    )
-    existing = result.scalar_one_or_none()
-
-    if existing:
-        existing.oauth_token = oauth_token_json
-        existing.refresh_token = refresh_token
-        existing.status = ConnectionStatus.active
-    else:
-        conn = CalendarConnection(
-            user_id=user_id,
-            provider=CalendarProvider.google,
-            oauth_token=oauth_token_json,
-            refresh_token=refresh_token,
-            status=ConnectionStatus.active,
-        )
-        db.add(conn)
-
-    await db.flush()

@@ -38,6 +38,7 @@ from app.agent.common import (
 from app.agent.deps import _deps
 from app.agent.state import ProposalDraft, SMSState
 from app.agent.tools import ProposalEdit
+from app import settings
 from app.models import (
     FeedbackSignal,
     OnboardingStep,
@@ -298,15 +299,19 @@ async def route_yes(state: dict, config: RunnableConfig) -> dict:
         title = f"Date night: {activity.name}" if activity else "Date night"
 
         # Write the event to both partners' calendars.
-        for rc in await deps.calendar_resolver.get_active_adapters(
+        active_adapters = await deps.calendar_resolver.get_active_adapters(
             deps.db, state["couple_id"]
-        ):
+        )
+        for rc in active_adapters:
             await rc.adapter.create_event(
                 start=proposal.proposed_start,
                 end=proposal.proposed_end,
                 title=title,
                 description="Long-distance date (confirmed via SMS)",
             )
+
+        # Persist any refreshed OAuth tokens after calendar access.
+        await deps.calendar_resolver.persist_tokens(deps.db, active_adapters)
 
         # Notify the other partner.
         delivery_results: list[dict] = []
@@ -890,7 +895,7 @@ async def onboarding_node(state: dict, config: RunnableConfig) -> dict:
                     phone,
                     f"📱 Open this link in your browser to connect "
                     f"Google Calendar:\n"
-                    f"https://example.com/auth/google?user_id={user_id}\n"
+                    f"{settings.app_base_url}/auth/google?user_id={user_id}\n"
                     f"Text DONE when you're finished.",
                 )
             elif choice == "apple":
@@ -1261,11 +1266,16 @@ async def _slot_free(
     probe_start = start - timedelta(hours=2)
     probe_end = end + timedelta(hours=2)
 
-    for rc in await deps.calendar_resolver.get_active_adapters(deps.db, couple_id):
+    active_adapters = await deps.calendar_resolver.get_active_adapters(deps.db, couple_id)
+    for rc in active_adapters:
         blocks = await rc.adapter.get_busy_blocks(probe_start, probe_end)
         for b in blocks:
             if b.start < end and b.end > start:
                 return False, (
                     f"your calendar is busy {b.start.isoformat()}–{b.end.isoformat()}"
                 )
+
+    # Persist any refreshed OAuth tokens after calendar access.
+    await deps.calendar_resolver.persist_tokens(deps.db, active_adapters)
+
     return True, ""

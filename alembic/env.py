@@ -7,13 +7,15 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from app.config import Settings
+from app.database import _normalize_url
 from app.models import Base
 
 config = context.config
 
-# Inject the database URL from app settings (reads .env)
+# Inject the database URL from app settings (reads .env), normalising the
+# driver suffix so that Railway's plain ``postgresql://`` URL works.
 if not config.get_main_option("sqlalchemy.url"):
-    config.set_main_option("sqlalchemy.url", Settings().database_url)
+    config.set_main_option("sqlalchemy.url", _normalize_url(Settings().database_url))
 
 # Configure logging
 if config.config_file_name is not None:

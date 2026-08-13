@@ -85,6 +85,9 @@ async def fetch_availability(state: dict, config: RunnableConfig) -> dict:
                 "Partner B has no active calendar connection — treated as fully free"
             )
 
+        # Persist any refreshed OAuth tokens after calendar access.
+        await deps.calendar_resolver.persist_tokens(deps.db, resolved)
+
         return {"busy_blocks_a": busy_a, "busy_blocks_b": busy_b, "errors": errors}
     except Exception as exc:
         logger.exception("Error in fetch_availability: %s", exc)

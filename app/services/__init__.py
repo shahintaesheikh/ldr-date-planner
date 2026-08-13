@@ -13,7 +13,7 @@ session as their first argument (it needs no per-session state).  The
 session-scoped stores are constructed per request.
 """
 
-from app.services.calendar_connector import connect_apple, connect_google
+from app.services.calendar_connector import connect_apple
 from app.services.calendar_resolver import CalendarResolver, ResolvedCalendar
 from app.services.catalog import CatalogService, catalog_service
 from app.services.couple_store import CoupleStore
@@ -37,5 +37,4 @@ __all__ = [
     "TraitStore",
     "catalog_service",
     "connect_apple",
-    "connect_google",
 ]

@@ -26,6 +26,12 @@ from app.models import Couple
 
 logger = logging.getLogger(__name__)
 
+# The SMS sent to prompt a rating.
+RATING_PROMPT_TEMPLATE = (
+    "How was your date? Reply with a number 1-5 (1=terrible, 5=amazing), "
+    "or SKIP to skip."
+)
+
 # How often to check for proposals awaiting rating.
 _RATING_CHECK_INTERVAL_HOURS = 6
 
@@ -61,7 +67,7 @@ def _build_llm() -> ChatAnthropic | None:
         )
         return None
     return ChatAnthropic(
-        model="claude-sonnet-4-20250514",
+        model="claude-sonnet-4-6",
         temperature=0.7,
         api_key=settings.anthropic_api_key,
     )
@@ -128,7 +134,6 @@ async def check_awaiting_ratings() -> None:
                 sent = False
                 for user in users:
                     try:
-                        from app.services.rating_scheduler import RATING_PROMPT_TEMPLATE
                         sid = await gateway.send(
                             to_phone=user.phone_number,
                             body=RATING_PROMPT_TEMPLATE,

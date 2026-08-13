@@ -4,13 +4,14 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
-    # --- Database ---
-    database_url: str = "postgresql+asyncpg://localhost:5432/ldr_date"
-
-    # --- FastAPI ---
+    # --- App ---
     app_host: str = "0.0.0.0"
     app_port: int = 8000
     app_version: str = "0.1.0"
+    app_base_url: str = "http://localhost:8000"
+
+    # --- Database ---
+    database_url: str = "postgresql+asyncpg://localhost:5432/ldr_date"
 
     # --- LangSmith ---
     langsmith_api_key: str | None = None
