@@ -40,6 +40,14 @@ async def seed_catalog(db: AsyncSession = Depends(get_db)) -> dict:
     await db.commit()
     return {"inserted": inserted, "message": "Catalog seeded successfully" if inserted else "Catalog already contains data"}
 
+@router.get("/count", response_model=dict)
+async def count_activities(
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Return the total number of catalog entries."""
+    count = await catalog_service.count(db)
+    return {"count": count}
+
 
 @router.get("", response_model=list[DateActivityRead])
 async def list_activities(
@@ -161,10 +169,3 @@ async def delete_activity(
     await db.commit()
 
 
-@router.get("/count", response_model=dict)
-async def count_activities(
-    db: AsyncSession = Depends(get_db),
-) -> dict:
-    """Return the total number of catalog entries."""
-    count = await catalog_service.count(db)
-    return {"count": count}
