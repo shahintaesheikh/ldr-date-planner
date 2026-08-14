@@ -4,6 +4,7 @@ from fastapi import APIRouter
 
 from app import db, settings
 from app.schemas import HealthResponse
+from sqlalchemy import text
 
 router = APIRouter(tags=["health"])
 
@@ -18,7 +19,7 @@ async def health_check() -> HealthResponse:
     try:
         async with db.session() as session:
             await session.execute(
-                "SELECT 1"
+                text("SELECT 1")
             )  # lightweight connection check
             db_status = "connected"
     except Exception:
