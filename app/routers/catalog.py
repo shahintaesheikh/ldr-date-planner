@@ -63,20 +63,6 @@ async def list_activities(
     return [DateActivityRead.model_validate(a) for a in activities]
 
 
-@router.get("/{activity_id}", response_model=DateActivityRead)
-async def get_activity(
-    activity_id: int,
-    db: AsyncSession = Depends(get_db),
-) -> DateActivityRead:
-    """Get a single catalog entry by id."""
-    activity = await catalog_service.get_by_id(db, activity_id)
-    if activity is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Activity with id {activity_id} not found",
-        )
-    return DateActivityRead.model_validate(activity)
-
 
 @router.post("", response_model=DateActivityRead, status_code=status.HTTP_201_CREATED)
 async def create_activity(
@@ -154,6 +140,21 @@ async def check_duplicate(
     return result
 
 
+@router.get("/{activity_id}", response_model=DateActivityRead)
+async def get_activity(
+    activity_id: int,
+    db: AsyncSession = Depends(get_db),
+) -> DateActivityRead:
+    """Get a single catalog entry by id."""
+    activity = await catalog_service.get_by_id(db, activity_id)
+    if activity is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Activity with id {activity_id} not found",
+        )
+    return DateActivityRead.model_validate(activity)
+
+
 @router.delete("/{activity_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_activity(
     activity_id: int,
@@ -167,5 +168,7 @@ async def delete_activity(
             detail=f"Activity with id {activity_id} not found",
         )
     await db.commit()
+
+
 
 
