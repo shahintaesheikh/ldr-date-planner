@@ -144,7 +144,7 @@ class CatalogService:
         embedding_literal = str(query_embedding)
 
         params: dict = {
-            "embedding": query_embedding,
+            "embedding": embedding_literal,
             "limit": max_results,
         }
 
