@@ -1,4 +1,4 @@
-import pytests
+import pytest
 
 @pytest.mark.asyncio
 async def test_catalog_seed(client):
@@ -8,7 +8,7 @@ async def test_catalog_seed(client):
 @pytest.mark.asyncio
 async def test_catalog_search(client):
     res = await client.post(
-        "/catalog/search"
+        "/catalog/search",
         json={"query_text":"virtual cook-along", "max_results":3}
     )
     assert res.status_code == 200
