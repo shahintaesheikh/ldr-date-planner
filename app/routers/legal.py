@@ -5,7 +5,7 @@ from fastapi.responses import HTMLResponse
 
 router = APIRouter(tags=["legal"])
 
-_LEGAL_DIR = Path(__file__).parent.parent / "legal"
+_LEGAL_DIR = Path(__file__).parent.parent.parent / "legal"
 
 _PRIVACY_HTML = (_LEGAL_DIR / "privacy.html").read_text(encoding="utf-8")
 _TERMS_HTML = (_LEGAL_DIR / "terms.html").read_text(encoding="utf-8")
