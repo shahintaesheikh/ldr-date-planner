@@ -67,7 +67,7 @@ def _build_llm() -> ChatAnthropic | None:
         )
         return None
     return ChatAnthropic(
-        model="claude-sonnet-4-6",
+        model="claude-sonnet-5",
         temperature=0.7,
         api_key=settings.anthropic_api_key,
     )

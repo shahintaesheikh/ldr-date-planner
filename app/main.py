@@ -25,7 +25,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(
-    title="LDR Date Planner API",
+    title="FRIDAY",
     version=settings.app_version,
     lifespan=lifespan,
 )
