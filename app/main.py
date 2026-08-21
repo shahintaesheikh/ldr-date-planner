@@ -9,6 +9,7 @@ from app.routers import (
     google_auth_router,
     health_router,
     twilio_router,
+    legal_router,
 )
 from app.services.cadence_scheduler import start_scheduler, stop_scheduler
 
@@ -35,3 +36,4 @@ app.include_router(catalog_router)
 app.include_router(google_auth_router)
 app.include_router(health_router)
 app.include_router(twilio_router)
+app.include_router(legal_router)
